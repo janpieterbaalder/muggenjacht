@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { boxesToBVH } from './helpers';
 import { SwingSystem, restPose, type CamFrame, type MosquitoTarget, type ContactInfo } from '../src/swatter/swing';
-import { ARM_PLAN_MAX, WRIST, armPole, bodyFrame, handOnHandle, shoulderAt, solveArm, wristAngles } from '../src/swatter/armgeom';
+import { ARM_PLAN_MAX, WRIST, armPole, bodyFrame, handOnHandle, lookTiptoe, shoulderAt, solveArm, wristAngles } from '../src/swatter/armgeom';
 
 const cam: CamFrame = { eye: { x: 2, y: 1.6, z: 2 }, f: { x: 1, y: 0, z: 0 }, r: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 } };
 const noDoors = (_o: unknown, _d: unknown, max: number) => max;
@@ -142,4 +142,51 @@ test('whole swing near a table edge: never inside it, contact still on the wall'
   let rawWorst = 0;
   for (let i = 0; i < 70; i++) { raw.update(1 / 60, restPose(cam, 1, i / 60, { x: 0, y: 0, z: 0 }), []); rawWorst = Math.max(rawWorst, depthIn(bvh, raw.pose)); }
   assert.ok(rawWorst > 0.01, `setup: unguarded swing depth ${rawWorst}`);
+});
+
+test('resting swatter against a cupboard top and in a corner holds still (no shaking)', () => {
+  // standing 0.3 m from a 1.40 m cupboard looking a little down, and 0.25 m from a corner: the push-out used to be let
+  // go and applied again every frame and alternated between surfaces - up to 127 mm per frame at the cupboard
+  const floor = { min: [-0.1, -0.1, -0.1], max: [6.1, 0, 6.1], kind: 1, cls: 1 } as const;
+  const cases: [string, { min: [number, number, number]; max: [number, number, number] }[], number][] = [
+    ['cupboard', [{ ...floor, min: [...floor.min], max: [...floor.max] }, { min: [2.3, 0, 1], max: [3.0, 1.4, 3] }], -10],
+    ['corner', [{ ...floor, min: [...floor.min], max: [...floor.max] }, { min: [2.25, 0, -1], max: [2.35, 2.4, 5] }, { min: [-1, 0, 2.25], max: [5, 2.4, 2.35] }], 0],
+  ];
+  for (const [name, boxes, pitchDeg] of cases) {
+    const p = pitchDeg * Math.PI / 180;
+    const c: CamFrame = { eye: cam.eye, f: { x: Math.cos(p), y: Math.sin(p), z: 0 }, r: cam.r, up: { x: -Math.sin(p), y: Math.cos(p), z: 0 } };
+    const bvh = boxesToBVH(boxes);
+    const sys = new SwingSystem(bvh, noDoors);
+    let prev: { x: number; y: number; z: number } | null = null, maxStep = 0, worst = 0;
+    for (let i = 0; i < 300; i++) {
+      sys.update(1 / 60, sys.restFor(c, 1, i / 60), [], c, 1);
+      const h = sys.pose.h;
+      if (prev && i > 30) maxStep = Math.max(maxStep, Math.hypot(h.x - prev.x, h.y - prev.y, h.z - prev.z));
+      if (i > 30) { const { fwd, right } = bodyFrame(c.f, c.r); worst = Math.max(worst, new SwingSystem(bvh, noDoors).penetration(sys.pose, shoulderAt(c.eye, fwd, right, 1)).depth); }
+      prev = { ...h };
+    }
+    assert.ok(maxStep < 0.003, `${name}: head moves ${(maxStep * 1000).toFixed(1)} mm in one frame`);
+    assert.ok(worst <= 0.004, `${name}: inside the geometry by ${(worst * 1000).toFixed(1)} mm`);
+  }
+});
+
+test('a mosquito on the 2.31 m ceiling is reachable looking up from nearby (on the toes), not from afar', () => {
+  // it stayed ~9 cm out of reach even looking straight up: no rise onto the toes in the view, no shoulder lift
+  const ceiling = () => boxesToBVH([{ min: [-0.1, -0.1, -0.1], max: [6.1, 0, 6.1], kind: 1, cls: 1 }, { min: [-0.1, 2.31, -0.1], max: [6.1, 2.41, 6.1] }]);
+  const swingAt = (pitchDeg: number, hand: number) => {
+    const p = pitchDeg * Math.PI / 180, toes = lookTiptoe(p);
+    const c: CamFrame = { eye: { x: 3, y: 1.62 + toes, z: 3 }, f: { x: Math.cos(p), y: Math.sin(p), z: 0 }, r: { x: 0, y: 0, z: 1 }, up: { x: -Math.sin(p), y: Math.cos(p), z: 0 }, tiptoe: toes };
+    const sys = new SwingSystem(ceiling(), noDoors);
+    assert.ok(sys.begin(c, c.f, hand, 0, [], 0.32));
+    let got: ContactInfo | null = null;
+    for (let i = 0; i < 60; i++) { const g = sys.update(1 / 60, restPose(c, hand, i / 60, { x: 0, y: 0, z: 0 }), []); if (g && !got) got = g; }
+    return got;
+  };
+  for (const hand of [1, -1]) for (const pitch of [55, 65, 75]) {
+    const c = swingAt(pitch, hand);
+    assert.ok(c && !c.air && Math.abs(c.point.y - 2.31) < 0.02, `hand ${hand}, looking up ${pitch} deg: ${c ? (c.air ? 'air at ' + c.point.y.toFixed(2) : 'hit y ' + c.point.y.toFixed(2)) : 'no swing'}`);
+  }
+  // 0.8 m away (looking up only 35 deg) the arm is not stretched beyond its length: step closer
+  const far = swingAt(35, 1);
+  assert.ok(far && far.air, 'far ceiling point: air swing');
 });

@@ -26,6 +26,20 @@ export const BODY = {
  * never stretched beyond its length - a target further away needs a lean or a step (D48). */
 export const ARM_PLAN_MAX = 0.55;
 
+/** Rising onto the toes (m): looking up at the ceiling, or when a high target needs it. */
+export const TIPTOE = 0.08;
+/** Rise onto the toes while looking up (pitch in rad, + = up): from ~26 deg, fully at ~52 deg. */
+export function lookTiptoe(pitch: number): number { return TIPTOE * smooth(0.45, 0.9, pitch); }
+
+/** Raising the arm lifts the shoulder joint with the shoulder blade (elevation and upward rotation of the scapula, a
+ * few cm at full overhead reach): the joint centre rises with the arm's elevation. Without it a mosquito on the
+ * 2.31 m ceiling stayed 9 cm out of reach even straight overhead. */
+export const SHOULDER_LIFT = 0.07;
+export function shoulderLift(S: P3, wrist: P3): number {
+  const d = sub(wrist, S), l = len(d);
+  return l < 1e-6 ? 0 : SHOULDER_LIFT * smooth(0.2, 0.9, d.y / l);
+}
+
 /** Hand model landmarks in the swatter-handle frame (Blender: x = r, y = handle toward the grip end, z = palm/face
  * normal), from arm.glb (hand.py). ArmVisual overwrites them with the values stored in the file at load. */
 export const HAND = {

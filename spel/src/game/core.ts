@@ -91,7 +91,9 @@ export class Core {
     // standing on a bed the head would reach the ceiling (2.31 m): stoop so the eye stays CLIMB.headClear below it
     const ceil = this.player.ceilingAbove();
     const x = this.player.x + fx * this.lean.f, z = this.player.z + fz * this.lean.f;
-    const y = Math.min(this.feetY + PLAYER.eye + bobY, ceil - CLIMB.headClear) - this.lean.d;
+    // (rising on the toes - a negative lean.d - never lifts the eye closer to the ceiling than that either)
+    const top = ceil - CLIMB.headClear;
+    const y = Math.min(Math.min(this.feetY + PLAYER.eye + bobY, top) - this.lean.d, top);
     this.camera.position.set(x, y, z);
     const cp = Math.cos(this.pitch);
     this.camera.setTarget(new Vector3(x + fx * cp, y + Math.sin(this.pitch), z + fz * cp));

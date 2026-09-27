@@ -1,27 +1,15 @@
 // Web Audio engine: spatial mosquito buzz (worklet + HRTF panner + occlusion low-pass), small-room
-// reverb, material-dependent swat impacts (modal synthesis), whoosh, footsteps, doors, ambience.
+// reverb, material-dependent swatter slaps and knocks (impact.ts), whoosh, footsteps, doors, ambience.
 // All sounds are synthesised (no recordings). Hearing quality is NOT verified by code: listening
 // test on the target phone is required (CONTROLEPROTOCOL: audio must be heard).
+
+import { MODES, synthSlap, synthThump } from './impact';
 
 export type Surface = 'wall' | 'floor' | 'wood' | 'panel' | 'metal' | 'glass' | 'fabric' | 'plastic' | 'ceramic' | 'vinyl' | 'deck' | 'grass' | 'pvc' | 'acrylic' | 'leaves' | 'plant' | '';
 export const SURFACE_CLASSES: Surface[] = ['wall', 'floor', 'wood', 'panel', 'metal', 'glass', 'fabric', 'plastic', 'ceramic', 'vinyl', 'deck', 'grass', 'pvc', 'acrylic', 'leaves', 'plant', ''];
 
 interface Voice { src: AudioWorkletNode | OscillatorNode; pan: PannerNode; occl: BiquadFilterNode; gain: GainNode; send: GainNode; worklet: boolean; }
 
-// modal parameters per material: [freqHz, decaySec, amp]
-const MODES: Record<string, [number, number, number][]> = {
-  wall: [[118, 0.10, 1], [176, 0.08, 0.7], [262, 0.06, 0.5], [410, 0.04, 0.3], [1250, 0.012, 0.25]],
-  panel: [[210, 0.07, 1], [330, 0.05, 0.6], [520, 0.04, 0.4], [1600, 0.01, 0.25]],
-  wood: [[320, 0.06, 1], [540, 0.045, 0.7], [890, 0.03, 0.4], [1900, 0.012, 0.3]],
-  glass: [[1450, 0.13, 0.6], [2380, 0.11, 0.8], [3700, 0.08, 0.5], [5200, 0.05, 0.3], [260, 0.04, 0.35]],
-  metal: [[680, 0.28, 0.6], [1180, 0.24, 0.8], [1960, 0.2, 0.6], [3150, 0.14, 0.4]],
-  plastic: [[820, 0.035, 0.8], [1450, 0.03, 0.6], [2600, 0.015, 0.4]],
-  ceramic: [[1100, 0.09, 0.7], [1870, 0.07, 0.6], [3100, 0.05, 0.4]],
-  acrylic: [[560, 0.05, 0.8], [980, 0.04, 0.6], [1700, 0.02, 0.4]],
-  fabric: [[140, 0.03, 0.6], [260, 0.025, 0.4]],
-  vinyl: [[160, 0.05, 0.8], [300, 0.04, 0.5], [900, 0.012, 0.3]],
-  deck: [[190, 0.07, 1], [360, 0.05, 0.6], [700, 0.03, 0.4]],
-};
 const ALIAS: Record<string, string> = { floor: 'vinyl', pvc: 'plastic', grass: 'fabric', leaves: 'fabric', plant: 'fabric', '': 'panel' };
 
 export class AudioEngine {
@@ -30,7 +18,9 @@ export class AudioEngine {
   enabled = true; volume = 0.9;
   private workletReady = false;
   private voices = new Map<number, Voice>();
-  private buffers = new Map<string, AudioBuffer[]>();
+  /** the swatter's slap and a struck object's knock, per material, a few variants each */
+  private slaps = new Map<string, AudioBuffer[]>();
+  private thumps = new Map<string, AudioBuffer[]>();
   private noise!: AudioBuffer;
   private ambNodes: AudioNode[] = [];
   private fridge: { osc: OscillatorNode[]; pan: PannerNode; g: GainNode } | null = null;
@@ -48,7 +38,11 @@ export class AudioEngine {
     this.reverb = c.createConvolver(); this.reverb.buffer = this.roomIR(0.38, 0.9);
     this.reverbIn = c.createGain(); this.reverbIn.gain.value = 0.16; this.reverbIn.connect(this.reverb); this.reverb.connect(this.master);
     this.noise = this.makeNoise(2.0);
-    for (const m of Object.keys(MODES)) this.buffers.set(m, [0, 1, 2].map((k) => this.impact(m, k)));
+    const buf = (d: Float32Array) => { const b = c.createBuffer(1, d.length, c.sampleRate); b.getChannelData(0).set(d); return b; };
+    for (const m of Object.keys(MODES)) {
+      this.slaps.set(m, [0, 1, 2, 3].map((k) => buf(synthSlap(m, k, c.sampleRate))));
+      this.thumps.set(m, [0, 1, 2].map((k) => buf(synthThump(m, k, c.sampleRate))));
+    }
     try {
       await c.audioWorklet.addModule(import.meta.env.BASE_URL + 'audio/buzz-worklet.js');
       this.workletReady = true;
@@ -128,21 +122,28 @@ export class AudioEngine {
   }
   stopAllMosquitoes() { for (const id of [...this.voices.keys()]) this.stopMosquito(id); }
 
-  /** Impact at world position; speed m/s; surface class. killed adds a tiny squash. */
+  /** Swatter slap at world position; speed m/s; surface class. killed adds a tiny squash. */
   swat(surface: Surface, speed: number, x: number, y: number, z: number, killed = false) {
-    const c = this.ctx; if (!c || !this.enabled) return;
     const m = MODES[surface] ? surface : (ALIAS[surface] ?? 'panel');
-    const bufs = this.buffers.get(m) ?? this.buffers.get('panel')!;
+    this.play(this.slaps, m, Math.min(1.3, 0.25 + speed / 9) * (m === 'fabric' ? 0.6 : 1), x, y, z);
+    if (killed && this.ctx && this.enabled) this.noiseBurst(x, y, z, 5200, 3, 0.006, 0.05);
+  }
+
+  /** Knock of a struck object (a door falling shut). */
+  private thump(surface: string, speed: number, x: number, y: number, z: number) {
+    this.play(this.thumps, MODES[surface] ? surface : 'panel', Math.min(1.3, 0.25 + speed / 9), x, y, z);
+  }
+
+  private play(set: Map<string, AudioBuffer[]>, m: string, gain: number, x: number, y: number, z: number) {
+    const c = this.ctx; if (!c || !this.enabled) return;
+    const bufs = set.get(m) ?? set.get('panel')!;
     const src = c.createBufferSource(); src.buffer = bufs[Math.floor(Math.random() * bufs.length)];
     src.playbackRate.value = 0.94 + Math.random() * 0.12;
-    const g = c.createGain(); g.gain.value = Math.min(1.3, 0.25 + speed / 9) * (m === 'fabric' ? 0.6 : 1);
+    const g = c.createGain(); g.gain.value = gain;
     const p = this.panner(); p.refDistance = 0.5;
     this.setPos(p, x, y, z);
     src.connect(g).connect(p).connect(this.sfx); g.connect(this.reverbIn);
     src.start();
-    // plastic slap of the swatter face itself (not on fabric)
-    if (m !== 'fabric') this.noiseBurst(x, y, z, 2600, 1.1, 0.012, 0.18 * Math.min(1.4, speed / 6));
-    if (killed) this.noiseBurst(x, y, z, 5200, 3, 0.006, 0.05);
   }
 
   whoosh(speed: number, x: number, y: number, z: number) {
@@ -173,7 +174,7 @@ export class AudioEngine {
     const c = this.ctx; if (!c || !this.enabled) return;
     this.noiseBurst(x, y, z, 2200, 4, 0.02, 0.08);                       // latch click
     const t = c.currentTime;
-    if (!open) setTimeout(() => this.swat('panel', 2.2, x, y, z), 240);  // closing thump
+    if (!open) setTimeout(() => this.thump('panel', 2.2, x, y, z), 240);  // closing thump
     const o = c.createOscillator(); o.type = 'triangle';
     o.frequency.setValueAtTime(open ? 380 : 300, t + 0.05); o.frequency.linearRampToValueAtTime(open ? 520 : 260, t + 0.35);
     const g = c.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.012, t + 0.1); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
@@ -260,21 +261,6 @@ export class AudioEngine {
     if (head) g.connect(this.sfx);
     else { const p = this.panner(); this.setPos(p, x, y, z); g.connect(p).connect(this.sfx); }
     src.start(t, Math.random()); src.stop(t + dur * 4 + 0.02);
-  }
-  private impact(material: string, variant: number): AudioBuffer {
-    const c = this.ctx!, sr = c.sampleRate, dur = 0.45, n = Math.floor(sr * dur);
-    const b = c.createBuffer(1, n, sr), d = b.getChannelData(0);
-    const modes = MODES[material];
-    const rnd = (k: number) => Math.sin(k * 12.9898 + variant * 78.233) * 43758.5453 % 1;
-    for (const [f, dec, a] of modes) {
-      const ff = f * (1 + rnd(f) * 0.04), ph = rnd(f * 3) * 6.28;
-      for (let i = 0; i < n; i++) { const t = i / sr; d[i] += a * Math.exp(-t / dec) * Math.sin(2 * Math.PI * ff * t + ph); }
-    }
-    // contact transient
-    for (let i = 0; i < Math.floor(sr * 0.004); i++) d[i] += (Math.random() * 2 - 1) * (1 - i / (sr * 0.004)) * 0.8;
-    let mx = 0; for (let i = 0; i < n; i++) mx = Math.max(mx, Math.abs(d[i]));
-    for (let i = 0; i < n; i++) d[i] /= mx || 1;
-    return b;
   }
   private roomIR(rt: number, bright: number): AudioBuffer {
     const c = this.ctx!, sr = c.sampleRate, n = Math.floor(sr * rt * 1.2), b = c.createBuffer(2, n, sr);

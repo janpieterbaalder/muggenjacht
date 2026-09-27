@@ -3,7 +3,7 @@
 // shaft against the world, doors and mosquitoes. Visual pose, physics volume, sound and outcome all
 // use the same contact time. Babylon frame (x east, y up, z south), metres, seconds.
 import type { TriBVH, RayHit } from '../physics/bvh';
-import { ARM_PLAN_MAX, HAND, WRIST, armPole, bodyFrame, handOnHandle, shoulderAt, solveArm, wristAngles } from './armgeom';
+import { ARM_PLAN_MAX, BODY, HAND, TIPTOE, WRIST, armPole, bodyFrame, handOnHandle, shoulderAt, shoulderLift, solveArm, wristAngles } from './armgeom';
 
 export type V3 = { x: number; y: number; z: number };
 const v = (x = 0, y = 0, z = 0): V3 => ({ x, y, z });
@@ -26,7 +26,8 @@ export const MOSQ_R = 0.011;                          // body/leg envelope + sma
  * the wire handle of a swatter gives). hu/hn = handle direction and palm/handle normal (the hand frame). */
 export interface Pose { h: V3; n: V3; u: V3; r: V3; grip: V3; flex: number; hu: V3; hn: V3; }
 
-export interface CamFrame { eye: V3; f: V3; r: V3; up: V3; }
+/** tiptoe: how far (m) the eye is already raised on the toes (looking up); a plan can only rise the rest of TIPTOE. */
+export interface CamFrame { eye: V3; f: V3; r: V3; up: V3; tiptoe?: number; }
 
 export function restPose(c: CamFrame, hand: number, t: number, sway: V3): Pose {
   // held low at the right (or left) of view, head up, face forward; gentle idle breathing
@@ -36,7 +37,22 @@ export function restPose(c: CamFrame, hand: number, t: number, sway: V3): Pose {
   const h = add(add(add(c.eye, c.f, 0.40), c.r, 0.19 * hand + sway.x), c.up, -0.10 + br + sway.y);
   const n = norm(add(add(c.f, c.r, -0.2 * hand), c.up, 0.05));
   const u = norm(add(add(v(-c.up.x, -c.up.y, -c.up.z), c.f, -0.4), c.r, 0.2 * hand));      // handle down/back toward the hand
-  return finishPose(h, n, u, 0.35);
+  // held straight: the head in line with the handle (the wire only bends in a slap). Until now the rest pose kept a
+  // 20 deg bend, which tilted the head's plastic rib out of its plane - the head looked crooked on the handle. The
+  // swatter is turned as a whole instead, so the hand stays where it was.
+  const bent = finishPose(h, n, u, 0.35);
+  return finishPose(h, bent.hn, bent.hu, 0);
+}
+
+/** The wire handle leaves the head's moulded plastic rib along u (the rib never bends) and runs to the hand, where it
+ * lies along hu: a cubic Bezier, straight when the pose has no flex, bending smoothly when the head is flexed against
+ * the handle (as the wire gives when the head slaps a surface). t = 0 inside the rib end, 1 at the grip. */
+export const WIRE = { start: 0.02, pastGrip: 0.045, radius: 0.0022 };
+export function wirePoint(p: Pose, t: number): V3 {
+  const a = add(p.h, p.u, HAND.neck + WIRE.start), g = p.grip;
+  const k = len(sub(g, a)) / 3, b1 = add(a, p.u, k), b2 = add(g, p.hu, -k), s = 1 - t;
+  const w0 = s * s * s, w1 = 3 * s * s * t, w2 = 3 * s * t * t, w3 = t * t * t;
+  return v(w0 * a.x + w1 * b1.x + w2 * b2.x + w3 * g.x, w0 * a.y + w1 * b1.y + w2 * b2.y + w3 * g.y, w0 * a.z + w1 * b1.z + w2 * b2.z + w3 * g.z);
 }
 
 export function finishPose(h: V3, n: V3, u: V3, flex = 0): Pose {
@@ -60,35 +76,44 @@ export interface StrikePlan { pose: Pose; lean: number; crouch: number; cost: nu
  * the (leaned) shoulder and the hand within the wrist and forearm range. Searches the rotation of the swatter about
  * its face normal, the neck flex, the upper-body lean and (for high targets) rising onto the toes; the most comfortable
  * whole-body pose wins. null = not reachable. */
-export function planStrike(c: CamFrame, P: V3, n: V3, hand: number, leanMax: number, coarse = false): StrikePlan | null {
+export function planStrike(c: CamFrame, P: V3, n: V3, hand: number, leanMax: number, coarse = false, air = false): StrikePlan | null {
   const nPh = coarse ? 16 : 32, fdStep = coarse ? 20 : 10, leanStep = coarse ? 0.16 : 0.064;
   const { fwd, right } = bodyFrame(c.f, c.r);
   const base = crouchFor(c.eye.y, P.y);
-  // high targets (ceiling): rise onto the toes (negative crouch) before anything else
-  const crouches = P.y > c.eye.y + 0.3 && base === 0 ? [0, -0.04, -0.07] : [base];
+  // high targets (ceiling): rise onto the toes (negative crouch) before anything else - as far as looking up has not
+  // raised the view already
+  const toes = Math.max(0, TIPTOE - (c.tiptoe ?? 0));
+  const crouches = P.y > c.eye.y + 0.3 && base === 0 && toes > 0.005 ? [0, -toes / 2, -toes] : [base];
   const pole = armPole(right, hand);
   const up = Math.abs(n.y) < 0.9 ? v(0, 1, 0) : v(1, 0, 0);
   const e1 = norm(cross(n, up)), e2 = cross(n, e1);
   const high = P.y > c.eye.y + 0.1;
+  // reaching up to the ceiling one stretches the arm fully and turns the forearm to its limit (adult ROM ~85 deg)
+  const overhead = P.y > c.eye.y + 0.3;
+  const armMax = overhead ? BODY.upper + BODY.fore : ARM_PLAN_MAX, rollMax = overhead ? 85 : WRIST.roll;
   let best: StrikePlan | null = null;
   for (let lean = 0; lean <= leanMax + 1e-6; lean += leanStep) for (const crouch of crouches) {
     const eye = v(c.eye.x + fwd.x * lean, c.eye.y - 0.35 * lean - crouch, c.eye.z + fwd.z * lean);
-    const S = shoulderAt(eye, fwd, right, hand);
-    const dHead = len(sub(P, S));
+    const S0 = shoulderAt(eye, fwd, right, hand);
+    const dHead = len(sub(P, S0));
     // moving the body costs a little: lean or rise only when it makes the arm clearly more comfortable
-    const bodyCost = 0.8 * (lean / 0.32) ** 2 + (crouch < 0 ? 0.6 * (-crouch / 0.07) ** 2 : 0);
+    const bodyCost = 0.8 * (lean / 0.32) ** 2 + (crouch < 0 ? 0.6 * (-crouch / TIPTOE) ** 2 : 0);
     if (best && bodyCost >= best.cost) continue;
     for (let i = 0; i < nPh; i++) {
       const ph = i / nPh * Math.PI * 2;
       const u = add(v(e1.x * Math.cos(ph), e1.y * Math.cos(ph), e1.z * Math.cos(ph)), e2, Math.sin(ph));
-      for (let fd = -10; fd <= 40; fd += fdStep) {
+      // the wire handle bends when the head slaps flat on a surface, further against the ceiling above you; in the air
+      // there is nothing to bend it
+      for (let fd = -10; fd <= (air ? 10 : high ? 60 : 40); fd += fdStep) {
         const pose = finishPose(P, n, u, fd * Math.PI / 180);
         const { wrist, fdir, palm } = handOnHandle(pose.grip, pose.r, pose.hu, pose.hn, hand);
+        // reaching up lifts the shoulder with the shoulder blade
+        const S = v(S0.x, S0.y + shoulderLift(S0, wrist), S0.z);
         const L = len(sub(wrist, S));
-        if (L > ARM_PLAN_MAX) continue;
+        if (L > armMax) continue;
         const j = solveArm(wrist, fdir, S, pole);
         const w = wristAngles(fdir, palm, wrist, j.elbow, j.shoulder, hand);
-        if (Math.abs(w.ext) > WRIST.ext || Math.abs(w.dev) > WRIST.dev || Math.abs(w.roll) > WRIST.roll) continue;
+        if (Math.abs(w.ext) > WRIST.ext || Math.abs(w.dev) > WRIST.dev || Math.abs(w.roll) > rollMax) continue;
         // prefer a relaxed wrist, little neck flex, the handle reaching back toward the body (grip nearer the
         // shoulder than the head), the elbow not behind the shoulder, a bent elbow (not a locked, straight arm),
         // the elbow below the shoulder (no 'chicken wing', except reaching up) and the hand in front of the body
@@ -171,17 +196,17 @@ export class SwingSystem {
     let P = add(c.eye, d, surface ? dist + 0.012 : dist);
     // contact orientation: face flush with surface, or face-on to the swing direction in air
     let n = surface ? norm(v(-nrm.x, -nrm.y, -nrm.z)) : d;
-    let plan = planStrike(c, P, n, hand, leanMax);
+    let plan = planStrike(c, P, n, hand, leanMax, false, !surface);
     // out of reach: the swing ends in the air where the arm (with the lean) runs out - binary search on the distance
     // with a coarse plan, then one full plan there
     if (!plan) {
       surface = false; aimM = -1; n = d;
       let lo = REACH.min, hi = dist;
-      if (planStrike(c, add(c.eye, d, lo), n, hand, leanMax, true)) {
-        for (let k = 0; k < 6; k++) { const mid = (lo + hi) / 2; if (planStrike(c, add(c.eye, d, mid), n, hand, leanMax, true)) lo = mid; else hi = mid; }
+      if (planStrike(c, add(c.eye, d, lo), n, hand, leanMax, true, true)) {
+        for (let k = 0; k < 6; k++) { const mid = (lo + hi) / 2; if (planStrike(c, add(c.eye, d, mid), n, hand, leanMax, true, true)) lo = mid; else hi = mid; }
         for (let back = 0; !plan && lo - back >= REACH.min; back += 0.03) {
           P = add(c.eye, d, lo - back);
-          plan = planStrike(c, P, n, hand, leanMax);
+          plan = planStrike(c, P, n, hand, leanMax, false, true);
           if (plan) dist = lo - back;
         }
       }
@@ -193,7 +218,8 @@ export class SwingSystem {
     const eyeL = len(sub(P, c.eye)) - plan.lean;
     const D = Math.max(0.12, Math.min(0.40, eyeL - 0.38));
     const preN = norm(add(n, v(0, 1, 0), 0.25));
-    const pre = finishPose(add(P, n, -D), preN, target.u, target.flex);
+    // straight in the approach; the wire bends into the planned flex only in the strike itself
+    const pre = finishPose(add(P, n, -D), preN, target.u, 0);
     // recovery target after contact
     const after = surface ? finishPose(add(P, n, -0.05), n, target.u, target.flex) : finishPose(add(P, d, 0.12), norm(add(d, c.up, -0.4)), target.u, target.flex);
     const ta = Math.max(0.10, Math.min(0.30, 0.08 + 0.45 * len(sub(pre.h, start.h)) + 0.25 * plan.lean));
@@ -239,7 +265,7 @@ export class SwingSystem {
     this.prevPose = this.pose ?? rest;
     const s = this.swing;
     let result: ContactInfo | null = null;
-    if (!s) { this.pose = cam ? this.resolve(rest, cam, hand, dt) : rest; this.velocity = v(); return null; }
+    if (!s) { this.pose = cam ? this.resolve(rest, cam, hand, dt, true) : rest; this.velocity = v(); return null; }
     const subs = 6;
     for (let i = 0; i < subs; i++) {
       const t0 = s.t, t1 = s.t + dt / subs;
@@ -274,10 +300,21 @@ export class SwingSystem {
    * held closer to the body, lower and more upright (as one does standing against a wall or leaning over a table). */
   restFor(c: CamFrame, hand: number, t: number): Pose {
     const p = restPose(c, hand, t, v());
-    const d = norm(sub(p.h, c.eye));
-    const free = this.bvh.raycast(c.eye.x, c.eye.y, c.eye.z, d.x, d.y, d.z, 0.8, hit, 15) ? hit.t : 0.8;
-    const k = Math.max(0, Math.min(1, (0.62 - Math.min(free, this.doorRay(c.eye, d, 0.8))) / 0.32));
-    if (k <= 0) return p;
+    // free space toward the swatter: the nearest of three rays (the head and 3 cm to either side), aimed at the pose
+    // without its breathing - one ray grazing an edge flipped between hit and miss as the head rose and fell
+    const p0 = restPose(c, hand, 0, v());
+    let free = 0.8;
+    for (const s of [0, 0.03, -0.03]) {
+      const d = norm(sub(add(p0.h, c.r, s), c.eye));
+      free = Math.min(free, this.bvh.raycast(c.eye.x, c.eye.y, c.eye.z, d.x, d.y, d.z, 0.8, hit, 15) ? hit.t : 0.8, this.doorRay(c.eye, d, 0.8));
+    }
+    const want = Math.max(0, Math.min(1, (0.62 - free) / 0.32));
+    // eased: the probe ray can slip past an edge and back, which made the resting swatter jump 8 cm to and fro
+    const dt = Math.min(0.1, t - this.restT);
+    this.restK = this.restK < 0 || dt < 0 ? want : this.restK + (want - this.restK) * (1 - Math.exp(-dt / 0.12));
+    this.restT = t;
+    const k = this.restK;
+    if (k <= 1e-4) return p;
     const h = add(add(p.h, c.f, -0.15 * k), c.up, -0.09 * k);
     return finishPose(h, norm(add(p.n, c.up, 0.6 * k)), p.u, p.flex);
   }
@@ -292,7 +329,7 @@ export class SwingSystem {
     const pts: V3[] = [S, p.grip, add(p.grip, p.hn, 0.035), add(p.grip, p.hn, -0.035), add(p.grip, p.hu, 0.05), hw.wrist, add(hw.wrist, hw.fdir, 0.08)];
     const parent = [-1, 0, 1, 1, 1, 1, 5];
     let prev = 1;
-    for (const k of [0.26, 0.17, 0.08]) { pts.push(add(neck, p.hu, k)); parent.push(prev); prev = pts.length - 1; }
+    for (const t of [0.75, 0.45, 0.15]) { pts.push(wirePoint(p, t)); parent.push(prev); prev = pts.length - 1; }
     pts.push(neck); parent.push(prev);
     pts.push(p.h); parent.push(pts.length - 2);
     const hi = pts.length - 1;
@@ -331,19 +368,40 @@ export class SwingSystem {
 
   /** Keep the shown swatter out of the world (D48 follow-up: it partly vanished into furniture and walls). The chain
    * shoulder-hand-shaft-head is tested for crossings; the whole swatter is pushed out along the crossed surface's
-   * normal (a few iterations, deepest point first). Touching (<= 3 mm, e.g. the face flat on a wall at contact) is
+   * normal (a few iterations, deepest point first). Touching (<= 0.5 mm, e.g. the face flat on a wall at contact) is
    * allowed, and merely being hidden behind something (a chair back) is not a fault. The correction is applied at once
-   * and released smoothly. */
+   * and released smoothly - but only as far as the swatter stays clear: a correction that is still needed is kept.
+   * Letting it go every frame and pushing out again made the swatter shake against furniture and in corners (up to
+   * 13 cm per frame at a cupboard top, where the push-out alternated between the top and the front face). */
   private corr = v();
-  resolve(p: Pose, c: CamFrame, hand: number, dt: number): Pose {
+  private lastIn: V3 | null = null;
+  private restK = -1; private restT = 0;
+  resolve(p: Pose, c: CamFrame, hand: number, dt: number, resting = false): Pose {
     const { fwd, right } = bodyFrame(c.f, c.r);
     const S = shoulderAt(c.eye, fwd, right, hand);
-    let off = lerp3(this.corr, v(), 1 - Math.exp(-dt / 0.08));
+    // release at most 18 cm/s, and only the part of it that leaves the swatter clear; push out just to the surface, so
+    // a slowly moving pose (breathing) is followed smoothly instead of in steps of tolerance + margin
+    const tol = 0.0005;
+    const cl = len(this.corr), rel = cl < 1e-6 ? 0 : Math.min(1 - Math.exp(-dt / 0.08), 0.18 * dt / cl);
+    // (with 1 cm to spare in that direction: letting go right up to the object made the swatter creep along its edge,
+    // where the crossing test flips, and it was pushed back in small jolts)
+    let off = this.corr;
+    for (const k of [1, 0.5, 0.25]) {
+      const cand = lerp3(this.corr, v(), rel * k), spare = lerp3(this.corr, v(), Math.min(1, rel * k + 0.01 / Math.max(cl, 1e-6)));
+      if (this.penetration(p, S, cand, hand).depth <= tol && this.penetration(p, S, spare, hand).depth <= tol) { off = cand; break; }
+    }
     for (let it = 0; it < 6; it++) {
       const { depth, n } = this.penetration(p, S, off, hand);
-      if (depth <= 0.003) break;
-      off = add(off, n, depth + 0.004);
+      if (depth <= tol) break;
+      off = add(off, n, depth + tol);
     }
+    // the resting swatter takes a new correction in at most 2 cm per frame plus twice its own motion: at an edge the
+    // crossing test can flip, and a sudden 15 cm jump of a swatter held still reads as a glitch (in a swing the
+    // correction applies at once: the head must never be seen inside a table it sweeps past)
+    const moved = this.lastIn ? len(sub(p.h, this.lastIn)) : 1;
+    this.lastIn = p.h;
+    const dOff = sub(off, this.corr), dl = len(dOff), lim = 0.02 + 2 * moved;
+    if (resting && dl > lim) off = add(this.corr, dOff, lim / dl);
     this.corr = len(off) < 1e-5 ? v() : off;
     if (len(this.corr) < 1e-5) return p;
     return finishPose(add(p.h, this.corr), p.n, p.u, p.flex);
@@ -391,8 +449,8 @@ export class SwingSystem {
       }
     }
     // shaft points (neck and mid-shaft) may catch edges first
-    for (const k of [0.07, 0.18]) {
-      const q0 = add(add(p0.h, p0.u, HAND.neck), p0.hu, k), q1 = add(add(p1.h, p1.u, HAND.neck), p1.hu, k);
+    for (const t of [0.2, 0.55]) {
+      const q0 = wirePoint(p0, t), q1 = wirePoint(p1, t);
       const d = sub(q1, q0), l = len(d);
       if (l < 1e-7) continue;
       const dn = v(d.x / l, d.y / l, d.z / l);
