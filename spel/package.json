@@ -1,0 +1,21 @@
+{
+  "name": "muggenjacht-spel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node tests/run.mjs"
+  },
+  "dependencies": {
+    "@babylonjs/core": "9.27.1",
+    "@babylonjs/loaders": "9.27.1"
+  },
+  "devDependencies": {
+    "@gltf-transform/cli": "^4.5.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.0"
+  }
+}

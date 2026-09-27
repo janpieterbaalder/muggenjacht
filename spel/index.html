@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="theme-color" content="#1f2a24">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Nog één mug</title>
+</head>
+<body>
+  <canvas id="world" aria-label="Chalet. Beweeg met de linkerduim, kijk en sla met de rechterduim."></canvas>
+  <div id="hud" hidden>
+    <div id="toprow">
+      <div id="roundinfo"><span id="roundlabel">Ronde 1</span><strong id="objective">Zoek de mug</strong></div>
+      <button id="pause" class="round" aria-label="Pauze">❚❚</button>
+    </div>
+    <div id="crosshair" aria-hidden="true"></div>
+    <div id="toast" role="status"></div>
+    <div id="hint" aria-live="polite"></div>
+    <div id="stick" aria-hidden="true"><div id="stickknob"></div></div>
+    <button id="door" class="ctx" hidden>Deur</button>
+    <button id="swat" aria-label="Slaan">Sla</button>
+    <div id="bites" aria-label="Muggenbeten"></div>
+  </div>
+  <section id="menu" class="screen">
+    <div class="card">
+      <span class="eyebrow">EEN AVOND IN HET CHALET</span>
+      <h1>Nog één mug.</h1>
+      <p class="lede">Een zacht gezoem. Luister, zoek en sla raak — zonder het hele chalet wakker te maken.</p>
+      <div id="loadbar" hidden><div id="loadfill"></div><span id="loadlabel">Laden…</span></div>
+      <div class="buttons">
+        <button id="play" class="primary">Spelen</button>
+        <button id="rounds" class="secondary">Rondes</button>
+        <button id="practice" class="secondary">Oefenen</button>
+      </div>
+      <div class="buttons small">
+        <button id="settings" class="text">Instellingen</button>
+        <button id="howto" class="text">Bediening</button>
+      </div>
+      <p class="fine">Liggend spelen · geluid aan maakt het makkelijker · <span id="buildid"></span></p>
+      <p id="error" role="alert"></p>
+    </div>
+  </section>
+  <section id="lost" class="screen" hidden>
+    <div class="card">
+      <h2>Beeld weggevallen</h2>
+      <p class="lede">De telefoon had het beeld even nodig. Laad opnieuw; je kunt daarna verder met deze ronde.</p>
+      <div class="buttons"><button id="lostreload" class="primary">Opnieuw laden</button></div>
+    </div>
+  </section>
+  <section id="roundsel" class="screen" hidden><div class="card wide"><h2>Rondes</h2><div id="roundlist"></div><button class="text back">Terug</button></div></section>
+  <section id="settingsdlg" class="screen" hidden>
+    <div class="card wide">
+      <h2>Instellingen</h2>
+      <div class="grid">
+        <label>Geluid <input id="opt-sound" type="checkbox" checked></label>
+        <label>Volume <input id="opt-volume" type="range" min="0" max="1" step="0.05" value="0.9"></label>
+        <label>Linkshandig <input id="opt-left" type="checkbox"></label>
+        <label>Kijkgevoeligheid <input id="opt-sens" type="range" min="0.4" max="2.2" step="0.05" value="1"></label>
+        <label>Kijken omkeren <input id="opt-invert" type="checkbox"></label>
+        <label>Hoofdbeweging <input id="opt-bob" type="checkbox" checked></label>
+        <label>Hulp bij zoeken <select id="opt-help"><option value="uit">Uit</option><option value="licht" selected>Licht</option><option value="veel">Veel</option></select></label>
+        <label>Beeld <select id="opt-quality"><option value="hoog">Hoog</option><option value="normaal" selected>Normaal</option><option value="licht">Licht (oudere telefoons)</option></select></label>
+      </div>
+      <div class="buttons small"><button id="exportsave" class="text">Voortgang exporteren</button><button id="importsave" class="text">Importeren</button><button id="diag" class="text">Diagnose opslaan</button></div>
+      <input id="importfile" type="file" accept="application/json" hidden>
+      <button class="text back">Klaar</button>
+    </div>
+  </section>
+  <section id="howtodlg" class="screen" hidden>
+    <div class="card wide">
+      <h2>Bediening</h2>
+      <p><b>Telefoon (liggend):</b> linkerduim ergens links op het scherm om te lopen. Rechterduim slepen om te kijken; kort tikken op de mug of op <b>Sla</b> om te slaan. Tik <b>Deur</b> om een deur te openen of sluiten.</p>
+      <p><b>Laptop:</b> WASD of pijltjes lopen, slepen met de muis om te kijken, klik op een plek of spatie om te slaan, E voor deuren.</p>
+      <p>Muggen zoemen alleen als ze vliegen. Wordt het stil, dan zit ze ergens. Met een koptelefoon hoor je waar.</p>
+      <button class="text back">Terug</button>
+    </div>
+  </section>
+  <section id="pausedlg" class="screen" hidden>
+    <div class="card">
+      <h2>Pauze</h2>
+      <div class="buttons"><button id="resume" class="primary">Verder</button><button id="restart" class="secondary">Ronde opnieuw</button><button id="tomenu" class="secondary">Menu</button></div>
+      <div class="buttons small"><button id="pause-settings" class="text">Instellingen</button></div>
+    </div>
+  </section>
+  <section id="resultdlg" class="screen" hidden>
+    <div class="card">
+      <span class="eyebrow" id="res-eyebrow">RONDE KLAAR</span>
+      <h2 id="res-title">Stil.</h2>
+      <p id="res-text"></p>
+      <div class="buttons"><button id="res-next" class="primary">Volgende ronde</button><button id="res-again" class="secondary">Nog eens</button><button id="res-menu" class="secondary">Menu</button></div>
+    </div>
+  </section>
+  <section id="rotate" class="screen" hidden><div class="card"><h2>Draai je telefoon</h2><p>Deze muggen jaag je liggend.</p></div></section>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
