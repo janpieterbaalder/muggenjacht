@@ -190,3 +190,27 @@ test('a mosquito on the 2.31 m ceiling is reachable looking up from nearby (on t
   const far = swingAt(35, 1);
   assert.ok(far && far.air, 'far ceiling point: air swing');
 });
+
+test('flying mosquitoes stay in reach at 1.0-1.15 m (the wire may bend in a fast air swing)', () => {
+  // capping the handle bend for air swings (the wire "has nothing to bend it") cut hits at 1.0 m by half
+  const floorOnly = () => boxesToBVH([{ min: [-0.1, -0.1, -0.1], max: [6.1, 0, 6.1], kind: 1, cls: 1 }]);
+  const hits = (D: number) => {
+    let n = 0;
+    for (const hand of [1, -1]) for (const pd of [-30, -15, 0, 15, 30]) for (let a = -2; a <= 2; a++) for (let e = -2; e <= 2; e++) {
+      const p = pd * Math.PI / 180, y = a * 12 * Math.PI / 180;
+      const f = { x: Math.cos(y) * Math.cos(p), y: Math.sin(p), z: -Math.sin(y) * Math.cos(p) }, r = { x: Math.sin(y), y: 0, z: Math.cos(y) };
+      const up = { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x };
+      const c: CamFrame = { eye: { x: 3, y: 1.62, z: 3 }, f, r, up };
+      const d0 = { x: f.x + up.x * e * 0.1, y: f.y + up.y * e * 0.1, z: f.z + up.z * e * 0.1 }, l = Math.hypot(d0.x, d0.y, d0.z), d = { x: d0.x / l, y: d0.y / l, z: d0.z / l };
+      const pos = { x: 3 + d.x * D, y: 1.62 + d.y * D, z: 3 + d.z * D };
+      const m: MosquitoTarget[] = [{ idx: 0, pos, prev: pos, alive: true, resting: false, nrm: { x: 0, y: 1, z: 0 } }];
+      const sys = new SwingSystem(floorOnly(), noDoors);
+      if (!sys.begin(c, d, hand, 0, m, 0.32)) continue;
+      for (let i = 0; i < 60; i++) { const g = sys.update(1 / 60, restPose(c, hand, i / 60, { x: 0, y: 0, z: 0 }), m); if (g && g.mosquito === 0) { n++; break; } }
+    }
+    return n;
+  };
+  // (250 directions and hands; before this PR 140 and 70 were hit)
+  assert.ok(hits(1.0) >= 130, `1.0 m: ${hits(1.0)} of 250`);
+  assert.ok(hits(1.15) >= 60, `1.15 m: ${hits(1.15)} of 250`);
+});

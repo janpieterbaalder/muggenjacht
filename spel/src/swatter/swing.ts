@@ -76,7 +76,7 @@ export interface StrikePlan { pose: Pose; lean: number; crouch: number; cost: nu
  * the (leaned) shoulder and the hand within the wrist and forearm range. Searches the rotation of the swatter about
  * its face normal, the neck flex, the upper-body lean and (for high targets) rising onto the toes; the most comfortable
  * whole-body pose wins. null = not reachable. */
-export function planStrike(c: CamFrame, P: V3, n: V3, hand: number, leanMax: number, coarse = false, air = false): StrikePlan | null {
+export function planStrike(c: CamFrame, P: V3, n: V3, hand: number, leanMax: number, coarse = false): StrikePlan | null {
   const nPh = coarse ? 16 : 32, fdStep = coarse ? 20 : 10, leanStep = coarse ? 0.16 : 0.064;
   const { fwd, right } = bodyFrame(c.f, c.r);
   const base = crouchFor(c.eye.y, P.y);
@@ -102,9 +102,9 @@ export function planStrike(c: CamFrame, P: V3, n: V3, hand: number, leanMax: num
     for (let i = 0; i < nPh; i++) {
       const ph = i / nPh * Math.PI * 2;
       const u = add(v(e1.x * Math.cos(ph), e1.y * Math.cos(ph), e1.z * Math.cos(ph)), e2, Math.sin(ph));
-      // the wire handle bends when the head slaps flat on a surface, further against the ceiling above you; in the air
-      // there is nothing to bend it
-      for (let fd = -10; fd <= (air ? 10 : high ? 60 : 40); fd += fdStep) {
+      // the wire handle bends (it gives in the fast strike, and the head slaps flat on a surface), furthest against the
+      // ceiling above you
+      for (let fd = -10; fd <= (high ? 60 : 40); fd += fdStep) {
         const pose = finishPose(P, n, u, fd * Math.PI / 180);
         const { wrist, fdir, palm } = handOnHandle(pose.grip, pose.r, pose.hu, pose.hn, hand);
         // reaching up lifts the shoulder with the shoulder blade
@@ -196,17 +196,17 @@ export class SwingSystem {
     let P = add(c.eye, d, surface ? dist + 0.012 : dist);
     // contact orientation: face flush with surface, or face-on to the swing direction in air
     let n = surface ? norm(v(-nrm.x, -nrm.y, -nrm.z)) : d;
-    let plan = planStrike(c, P, n, hand, leanMax, false, !surface);
+    let plan = planStrike(c, P, n, hand, leanMax);
     // out of reach: the swing ends in the air where the arm (with the lean) runs out - binary search on the distance
     // with a coarse plan, then one full plan there
     if (!plan) {
       surface = false; aimM = -1; n = d;
       let lo = REACH.min, hi = dist;
-      if (planStrike(c, add(c.eye, d, lo), n, hand, leanMax, true, true)) {
-        for (let k = 0; k < 6; k++) { const mid = (lo + hi) / 2; if (planStrike(c, add(c.eye, d, mid), n, hand, leanMax, true, true)) lo = mid; else hi = mid; }
+      if (planStrike(c, add(c.eye, d, lo), n, hand, leanMax, true)) {
+        for (let k = 0; k < 6; k++) { const mid = (lo + hi) / 2; if (planStrike(c, add(c.eye, d, mid), n, hand, leanMax, true)) lo = mid; else hi = mid; }
         for (let back = 0; !plan && lo - back >= REACH.min; back += 0.03) {
           P = add(c.eye, d, lo - back);
-          plan = planStrike(c, P, n, hand, leanMax, false, true);
+          plan = planStrike(c, P, n, hand, leanMax);
           if (plan) dist = lo - back;
         }
       }
@@ -224,6 +224,8 @@ export class SwingSystem {
     const after = surface ? finishPose(add(P, n, -0.05), n, target.u, target.flex) : finishPose(add(P, d, 0.12), norm(add(d, c.up, -0.4)), target.u, target.flex);
     const ta = Math.max(0.10, Math.min(0.30, 0.08 + 0.45 * len(sub(pre.h, start.h)) + 0.25 * plan.lean));
     const ts = 0.05 + 0.08 * D / 0.40;                    // ~0.13 s over 40 cm: ~3 m/s mean, ~6 m/s at contact
+    // the start pose is the shown (pushed-out) pose: its correction is in it already
+    this.corr = v();
     this.swing = { phase: 'windup', t: 0, tApproach: ta, tContact: ta + ts, tEnd: ta + ts + (surface ? 0.36 : 0.40), start, pre, target, after, surface,
       aimDist: dist, lean: plan.lean, crouch: plan.crouch, contact: null, plannedNormal: nrm, hitMosquito: aimM };
     this.swings++;
@@ -374,34 +376,55 @@ export class SwingSystem {
    * Letting it go every frame and pushing out again made the swatter shake against furniture and in corners (up to
    * 13 cm per frame at a cupboard top, where the push-out alternated between the top and the front face). */
   private corr = v();
-  private lastIn: V3 | null = null;
+  private holdFrames = 0; private holdAt: V3 | null = null;
   private restK = -1; private restT = 0;
   resolve(p: Pose, c: CamFrame, hand: number, dt: number, resting = false): Pose {
     const { fwd, right } = bodyFrame(c.f, c.r);
     const S = shoulderAt(c.eye, fwd, right, hand);
-    // release at most 18 cm/s, and only the part of it that leaves the swatter clear; push out just to the surface, so
-    // a slowly moving pose (breathing) is followed smoothly instead of in steps of tolerance + margin
     const tol = 0.0005;
-    const cl = len(this.corr), rel = cl < 1e-6 ? 0 : Math.min(1 - Math.exp(-dt / 0.08), 0.18 * dt / cl);
-    // (with 1 cm to spare in that direction: letting go right up to the object made the swatter creep along its edge,
-    // where the crossing test flips, and it was pushed back in small jolts)
+    const cl = len(this.corr);
     let off = this.corr;
-    for (const k of [1, 0.5, 0.25]) {
-      const cand = lerp3(this.corr, v(), rel * k), spare = lerp3(this.corr, v(), Math.min(1, rel * k + 0.01 / Math.max(cl, 1e-6)));
-      if (this.penetration(p, S, cand, hand).depth <= tol && this.penetration(p, S, spare, hand).depth <= tol) { off = cand; break; }
+    if (cl > 1e-6) {
+      // in a swing the correction is let go quickly (the swing's own path is planned clear of the world)
+      if (!resting) off = lerp3(this.corr, v(), 1 - Math.exp(-dt / 0.08));
+      else {
+        // at rest: at most 18 cm/s, and only as far as the swatter stays clear with 1 cm to spare in that direction -
+        // letting go right up to the object made it creep along an edge, where the crossing test flips, and it was
+        // pushed back in small jolts
+        // (a failed try is repeated only every 4th frame while the swatter stays put: pressed into a corner the tries
+        // tripled the cost of the resting swatter)
+        if (this.holdFrames > 0 && this.holdAt && len(sub(p.h, this.holdAt)) < 0.005) this.holdFrames--;
+        else {
+          const rel = Math.min(1 - Math.exp(-dt / 0.08), 0.18 * dt / cl);
+          this.holdFrames = 3; this.holdAt = p.h;
+          for (const k of [1, 0.5, 0.25]) {
+            const cand = lerp3(this.corr, v(), rel * k), spare = lerp3(this.corr, v(), Math.min(1, rel * k + 0.01 / cl));
+            if (this.penetration(p, S, cand, hand).depth <= tol && this.penetration(p, S, spare, hand).depth <= tol) { off = cand; this.holdFrames = 0; break; }
+          }
+        }
+      }
     }
+    // push out just to the surface, so a slowly moving pose (breathing) is followed smoothly instead of in steps
+    let clear = false;
     for (let it = 0; it < 6; it++) {
       const { depth, n } = this.penetration(p, S, off, hand);
-      if (depth <= tol) break;
+      if (depth <= tol) { clear = true; break; }
       off = add(off, n, depth + tol);
     }
-    // the resting swatter takes a new correction in at most 2 cm per frame plus twice its own motion: at an edge the
-    // crossing test can flip, and a sudden 15 cm jump of a swatter held still reads as a glitch (in a swing the
-    // correction applies at once: the head must never be seen inside a table it sweeps past)
-    const moved = this.lastIn ? len(sub(p.h, this.lastIn)) : 1;
-    this.lastIn = p.h;
-    const dOff = sub(off, this.corr), dl = len(dOff), lim = 0.02 + 2 * moved;
-    if (resting && dl > lim) off = add(this.corr, dOff, lim / dl);
+    // in a tight spot the push-outs can chase each other between surfaces without getting clear: the resting swatter
+    // then tries once from no correction at all, and failing that stays where it was (unless that is clearly worse)
+    // instead of hopping 10-30 cm from frame to frame
+    if (!clear && resting) {
+      // (with the coarser steps of before: 4 mm past each crossed surface)
+      let fresh = v();
+      for (let it = 0; it < 8; it++) {
+        const { depth, n } = this.penetration(p, S, fresh, hand);
+        if (depth <= 0.003) { clear = true; break; }
+        fresh = add(fresh, n, depth + 0.004);
+      }
+      if (clear) off = fresh;
+      else if (cl > 1e-6 && this.penetration(p, S, this.corr, hand).depth <= this.penetration(p, S, off, hand).depth + 0.01) off = this.corr;
+    }
     this.corr = len(off) < 1e-5 ? v() : off;
     if (len(this.corr) < 1e-5) return p;
     return finishPose(add(p.h, this.corr), p.n, p.u, p.flex);

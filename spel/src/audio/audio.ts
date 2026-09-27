@@ -38,11 +38,8 @@ export class AudioEngine {
     this.reverb = c.createConvolver(); this.reverb.buffer = this.roomIR(0.38, 0.9);
     this.reverbIn = c.createGain(); this.reverbIn.gain.value = 0.16; this.reverbIn.connect(this.reverb); this.reverb.connect(this.master);
     this.noise = this.makeNoise(2.0);
-    const buf = (d: Float32Array) => { const b = c.createBuffer(1, d.length, c.sampleRate); b.getChannelData(0).set(d); return b; };
-    for (const m of Object.keys(MODES)) {
-      this.slaps.set(m, [0, 1, 2, 3].map((k) => buf(synthSlap(m, k, c.sampleRate))));
-      this.thumps.set(m, [0, 1, 2].map((k) => buf(synthThump(m, k, c.sampleRate))));
-    }
+    for (const m of Object.keys(MODES)) this.slaps.set(m, [0, 1, 2].map((k) => this.buffer(synthSlap(m, k, c.sampleRate))));
+    this.thumpsFor('panel');                                                  // the door; others on first use
     try {
       await c.audioWorklet.addModule(import.meta.env.BASE_URL + 'audio/buzz-worklet.js');
       this.workletReady = true;
@@ -131,7 +128,17 @@ export class AudioEngine {
 
   /** Knock of a struck object (a door falling shut). */
   private thump(surface: string, speed: number, x: number, y: number, z: number) {
-    this.play(this.thumps, MODES[surface] ? surface : 'panel', Math.min(1.3, 0.25 + speed / 9), x, y, z);
+    const m = MODES[surface] ? surface : 'panel';
+    this.thumpsFor(m);
+    this.play(this.thumps, m, Math.min(1.3, 0.25 + speed / 9), x, y, z);
+  }
+
+  private thumpsFor(m: string) {
+    if (this.ctx && !this.thumps.has(m)) this.thumps.set(m, [0, 1, 2].map((k) => this.buffer(synthThump(m, k, this.ctx!.sampleRate))));
+  }
+
+  private buffer(d: Float32Array): AudioBuffer {
+    const b = this.ctx!.createBuffer(1, d.length, this.ctx!.sampleRate); b.getChannelData(0).set(d); return b;
   }
 
   private play(set: Map<string, AudioBuffer[]>, m: string, gain: number, x: number, y: number, z: number) {

@@ -44,13 +44,25 @@ function biquad(d: Float32Array, type: 'hp' | 'lp' | 'peak', f: number, q: numbe
   return d;
 }
 
+/** Add a * exp(-t/dec) * sin(2 pi f t + ph) to d, by a two-term recursion (no exp/sin per sample: building all buffers
+ * at the Play tap took ~3x longer than before with the direct form); attack > 0 fades it in with 1 - exp(-t/attack). */
+function addMode(d: Float32Array, sr: number, f: number, dec: number, a: number, ph: number, attack = 0) {
+  const w = 2 * Math.PI * f / sr, r = Math.exp(-1 / (dec * sr)), c1 = 2 * r * Math.cos(w), c2 = r * r;
+  let y2 = a * Math.sin(ph), y1 = a * r * Math.sin(w + ph);
+  const qa = attack > 0 ? Math.exp(-1 / (attack * sr)) : 0;
+  let q = 1;
+  for (let i = 0; i < d.length; i++) {
+    const y = i === 0 ? y2 : i === 1 ? y1 : c1 * y1 - c2 * y2;
+    if (i > 1) { y2 = y1; y1 = y; }
+    d[i] += attack > 0 ? y * (1 - q) : y;
+    q *= qa;
+  }
+}
+
 /** Knock of a struck object: its modes ringing out (door closing, a thump). */
 export function synthThump(material: string, variant: number, sr: number): Float32Array {
   const n = Math.floor(sr * 0.45), d = new Float32Array(n), rnd = prng(hash(material) ^ Math.imul(variant + 1, 2654435761));
-  for (const [f, dec, a] of MODES[material] ?? MODES.panel) {
-    const ff = f * (1 + (rnd() - 0.5) * 0.08), ph = rnd() * 6.28;
-    for (let i = 0; i < n; i++) { const t = i / sr; d[i] += a * Math.exp(-t / dec) * Math.sin(2 * Math.PI * ff * t + ph); }
-  }
+  for (const [f, dec, a] of MODES[material] ?? MODES.panel) addMode(d, sr, f * (1 + (rnd() - 0.5) * 0.08), dec, a, rnd() * 6.28);
   // contact transient
   const nt = Math.floor(sr * 0.004);
   for (let i = 0; i < nt; i++) d[i] += (rnd() * 2 - 1) * (1 - i / nt) * 0.8;
@@ -74,24 +86,24 @@ export function synthSlap(material: string, variant: number, sr: number): Float3
   const sh = { ...SLAP, ...SLAP_BY[material] };
   const n = Math.floor(sr * 0.22), rnd = prng(hash('slap' + material) ^ Math.imul(variant + 1, 2654435761));
   const noise = () => rnd() * 2 - 1;
-  // crack + second slap of the flexing head
-  const t2 = 0.004 + 0.003 * rnd(), a2 = 0.35 + 0.2 * rnd();
-  const env = (t: number) => (t < 0 ? 0 : (1 - Math.exp(-t / 0.0003)) * (Math.exp(-t / 0.0025) + 0.22 * Math.exp(-t / 0.016)));
+  // crack + second slap of the flexing head: envelope (fast attack, 2.5 ms crack, 16 ms tail), built multiplicatively
+  const t2 = 0.004 + 0.003 * rnd(), a2 = 0.35 + 0.2 * rnd(), i2 = Math.floor(t2 * sr);
+  const env = new Float32Array(n);
+  { const ka = Math.exp(-1 / (0.0003 * sr)), k1 = Math.exp(-1 / (0.0025 * sr)), k2 = Math.exp(-1 / (0.016 * sr)); let qa = 1, q1 = 1, q2 = 1;
+    for (let i = 0; i < n; i++) { env[i] = (1 - qa) * (q1 + 0.22 * q2); qa *= ka; q1 *= k1; q2 *= k2; } }
   const crack = new Float32Array(n);
-  for (let i = 0; i < n; i++) { const t = i / sr; crack[i] = noise() * (env(t) + a2 * env(t - t2)); }
+  for (let i = 0; i < n; i++) crack[i] = noise() * (env[i] + (i >= i2 ? a2 * env[i - i2] : 0));
   biquad(crack, 'hp', sh.hp, 0.7, sr); biquad(crack, 'peak', sh.peak, 1.0, sr, 8); biquad(crack, 'lp', sh.lp, 0.7, sr); biquad(crack, 'lp', sh.lp, 0.7, sr);
   normalise(crack);
   // "ts": air hissing out of the mesh
   const hiss = new Float32Array(n);
-  for (let i = 0; i < n; i++) { const t = i / sr; hiss[i] = noise() * (1 - Math.exp(-t / 0.001)) * Math.exp(-t / 0.018); }
+  { const ka = Math.exp(-1 / (0.001 * sr)), kd = Math.exp(-1 / (0.018 * sr)); let qa = 1, qd = 1;
+    for (let i = 0; i < n; i++) { hiss[i] = noise() * (1 - qa) * qd; qa *= ka; qd *= kd; } }
   biquad(hiss, 'hp', material === 'fabric' ? 1500 : 3000, 0.7, sr); biquad(hiss, 'lp', 9000, 0.7, sr);
   normalise(hiss, sh.hiss);
   // the struck surface: its own modes, heavily damped
   const body = new Float32Array(n);
-  for (const [f, dec, a] of MODES[material] ?? MODES.panel) {
-    const ff = f * (1 + (rnd() - 0.5) * 0.06), ph = rnd() * 6.28, dd = dec * sh.bodyDecay;
-    for (let i = 0; i < n; i++) { const t = i / sr; body[i] += a * (1 - Math.exp(-t / 0.0015)) * Math.exp(-t / dd) * Math.sin(2 * Math.PI * ff * t + ph); }
-  }
+  for (const [f, dec, a] of MODES[material] ?? MODES.panel) addMode(body, sr, f * (1 + (rnd() - 0.5) * 0.06), dec * sh.bodyDecay, a, rnd() * 6.28, 0.0015);
   normalise(body, sh.body);
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) out[i] = crack[i] + hiss[i] + body[i];
