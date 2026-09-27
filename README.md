@@ -10,7 +10,7 @@ Bedoeld voor een telefoon in liggende stand; werkt ook op een desktopbrowser met
 
 ## Lokaal draaien
 
-Vereist Node.js 22.
+Vereist Node.js 22 of nieuwer (lokaal getest met 22; Vercel bouwt met 24).
 
 ```
 cd spel
@@ -31,4 +31,10 @@ naar `main` de productieversie en krijgt elke pull request een previewlink.
 - Babylon.js — Apache-2.0 (npm-afhankelijkheid, gebundeld in de build).
 - meshoptimizer-decoder — MIT, zie `spel/public/lib/meshopt_decoder.LICENSE.md`.
 - Hand in `spel/public/assets/arm.glb` — gebaseerd op het MakeHuman-model (MakeHuman-assets: CC0).
-- Hemel-HDRI's `charolettenbrunn_park`, `sunset_forest` en `kloppenheim_07` van Poly Haven — CC0.
+- Poly Haven-assets — CC0 1.0. De hemel gebruikt de HDRI's `charolettenbrunn_park`, `sunset_forest` en
+  `kloppenheim_07`; `chalet.glb` bevat onder meer de plant `potted_plant_04`. De herkomstregistratie van het
+  project (`assets/extern/HERKOMST.json`, niet in deze repository; per bestand bron-URL, SHA-256 en licentie)
+  noemt verder: texturen `white_oak_veneer`, `oak_veneer_03`, `wood_planks`, `beige_wall_001`, `leather_white`,
+  `terlenka`, `cotton_jersey`, `rough_linen`, `leafy_grass` en `bark_brown_02`; modellen `shrub_01`, `shrub_04`,
+  `tree_small_02` en de texturen van `pine_tree_01`; HDRI's `cloudy_vondelpark` en `blaubeuren_night`. Niet elk
+  gedownload onderdeel komt in het spel voor.
