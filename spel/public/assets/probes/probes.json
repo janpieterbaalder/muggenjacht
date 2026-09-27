@@ -1,0 +1,188 @@
+{
+ "avond": {
+  "bad": {
+   "logavg": 0.013041,
+   "mean": 0.018659,
+   "logavg_band": 0.013551,
+   "max": 1.52
+  },
+  "buiten": {
+   "logavg": 0.025487,
+   "mean": 0.038809,
+   "logavg_band": 0.022962,
+   "max": 9.379
+  },
+  "keuken": {
+   "logavg": 0.027718,
+   "mean": 0.042237,
+   "logavg_band": 0.019792,
+   "max": 6.803
+  },
+  "kind1": {
+   "logavg": 0.047603,
+   "mean": 0.068349,
+   "logavg_band": 0.039534,
+   "max": 13.151
+  },
+  "kind2": {
+   "logavg": 0.042407,
+   "mean": 0.060913,
+   "logavg_band": 0.035827,
+   "max": 13.407
+  },
+  "ouder": {
+   "logavg": 0.004492,
+   "mean": 0.006172,
+   "logavg_band": 0.003989,
+   "max": 2.312
+  },
+  "tuin": {
+   "logavg": 0.052782,
+   "mean": 0.151375,
+   "logavg_band": 0.031278,
+   "max": 12.388
+  },
+  "tuin_noord": {
+   "logavg": 0.032262,
+   "mean": 0.160644,
+   "logavg_band": 0.02065,
+   "max": 9.825
+  },
+  "wc": {
+   "logavg": 0.020094,
+   "mean": 0.02247,
+   "logavg_band": 0.024303,
+   "max": 0.07
+  },
+  "woon": {
+   "logavg": 0.043539,
+   "mean": 0.091212,
+   "logavg_band": 0.040408,
+   "max": 14.539
+  }
+ },
+ "dag": {
+  "bad": {
+   "logavg": 0.111021,
+   "mean": 0.270329,
+   "logavg_band": 0.10786,
+   "max": 16.847
+  },
+  "buiten": {
+   "logavg": 1.123954,
+   "mean": 1.774063,
+   "logavg_band": 1.042835,
+   "max": 96.236
+  },
+  "keuken": {
+   "logavg": 0.087555,
+   "mean": 0.14668,
+   "logavg_band": 0.072082,
+   "max": 7.039
+  },
+  "kind1": {
+   "logavg": 0.063058,
+   "mean": 0.090752,
+   "logavg_band": 0.055557,
+   "max": 13.213
+  },
+  "kind2": {
+   "logavg": 0.08588,
+   "mean": 0.113485,
+   "logavg_band": 0.080027,
+   "max": 12.988
+  },
+  "ouder": {
+   "logavg": 0.035496,
+   "mean": 0.048211,
+   "logavg_band": 0.033206,
+   "max": 2.724
+  },
+  "tuin": {
+   "logavg": 2.884539,
+   "mean": 8.02674,
+   "logavg_band": 1.643372,
+   "max": 140.0
+  },
+  "tuin_noord": {
+   "logavg": 1.731953,
+   "mean": 8.035102,
+   "logavg_band": 1.044145,
+   "max": 140.0
+  },
+  "wc": {
+   "logavg": 0.036964,
+   "mean": 0.045155,
+   "logavg_band": 0.042107,
+   "max": 1.258
+  },
+  "woon": {
+   "logavg": 0.111117,
+   "mean": 0.193075,
+   "logavg_band": 0.116559,
+   "max": 23.773
+  }
+ },
+ "nacht": {
+  "bad": {
+   "logavg": 0.008165,
+   "mean": 0.013333,
+   "logavg_band": 0.007671,
+   "max": 0.292
+  },
+  "buiten": {
+   "logavg": 0.000375,
+   "mean": 0.001442,
+   "logavg_band": 0.000221,
+   "max": 0.081
+  },
+  "keuken": {
+   "logavg": 0.021768,
+   "mean": 0.04018,
+   "logavg_band": 0.01328,
+   "max": 6.777
+  },
+  "kind1": {
+   "logavg": 0.044086,
+   "mean": 0.067922,
+   "logavg_band": 0.0346,
+   "max": 13.193
+  },
+  "kind2": {
+   "logavg": 0.038717,
+   "mean": 0.060124,
+   "logavg_band": 0.030328,
+   "max": 13.256
+  },
+  "ouder": {
+   "logavg": 0.006178,
+   "mean": 0.00926,
+   "logavg_band": 0.004277,
+   "max": 2.451
+  },
+  "tuin": {
+   "logavg": 4.6e-05,
+   "mean": 0.000142,
+   "logavg_band": 4.8e-05,
+   "max": 0.169
+  },
+  "tuin_noord": {
+   "logavg": 2.4e-05,
+   "mean": 0.000163,
+   "logavg_band": 2.4e-05,
+   "max": 0.075
+  },
+  "wc": {
+   "logavg": 0.018572,
+   "mean": 0.022043,
+   "logavg_band": 0.022495,
+   "max": 0.067
+  },
+  "woon": {
+   "logavg": 0.0368,
+   "mean": 0.089346,
+   "logavg_band": 0.029763,
+   "max": 14.539
+  }
+ }
+}

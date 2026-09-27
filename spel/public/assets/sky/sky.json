@@ -1,0 +1,29 @@
+{
+ "dag": {
+  "K": 112.15574999999998,
+  "hdri": "charolettenbrunn_park",
+  "strength": 35.0,
+  "clamp": 4.0,
+  "median_sky": 27.961117187499998,
+  "logavg": 4.787834160180498,
+  "clipped_fraction": 0.019093990325927734
+ },
+ "avond": {
+  "K": 3.168474375,
+  "hdri": "sunset_forest",
+  "strength": 0.55,
+  "clamp": 0.0,
+  "median_sky": 0.13337886718749997,
+  "logavg": 0.0586918288875315,
+  "clipped_fraction": 0.019776582717895508
+ },
+ "nacht": {
+  "K": 0.000237825,
+  "hdri": "kloppenheim_07",
+  "strength": 0.0002,
+  "clamp": 1.5,
+  "median_sky": 5.945625e-05,
+  "logavg": 3.276094490576336e-05,
+  "clipped_fraction": 0.003697991371154785
+ }
+}
