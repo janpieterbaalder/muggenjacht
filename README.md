@@ -22,12 +22,13 @@ npm run build    # -> spel/dist/
 
 ## Publiceren (Vercel)
 
-Vercel-project gekoppeld aan deze repository met **Root Directory `spel`**. De build-instellingen staan in
-`spel/vercel.json` (Vite, `npm run build`, uitvoer `dist`). Elke push naar `main` wordt de productieversie;
-pull requests krijgen een previewlink.
+Importeer deze repository in Vercel (vercel.com/new) met **Root Directory `spel`**. De build-instellingen
+staan in `spel/vercel.json` (Vite, `npm ci`, `npm run build`, uitvoer `dist`). Na het koppelen wordt elke push
+naar `main` de productieversie en krijgt elke pull request een previewlink.
 
 ## Licenties van onderdelen
 
 - Babylon.js — Apache-2.0 (npm-afhankelijkheid, gebundeld in de build).
 - meshoptimizer-decoder — MIT, zie `spel/public/lib/meshopt_decoder.LICENSE.md`.
+- Hand in `spel/public/assets/arm.glb` — gebaseerd op het MakeHuman-model (MakeHuman-assets: CC0).
 - Hemel-HDRI's `charolettenbrunn_park`, `sunset_forest` en `kloppenheim_07` van Poly Haven — CC0.
