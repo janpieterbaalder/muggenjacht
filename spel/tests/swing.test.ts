@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { boxesToBVH } from './helpers';
+import { boxesToBVH, prismToBVH } from './helpers';
 import { SwingSystem, restPose, type CamFrame, type MosquitoTarget, type ContactInfo } from '../src/swatter/swing';
 import { ARM_PLAN_MAX, WRIST, armPole, bodyFrame, handOnHandle, lookTiptoe, shoulderAt, solveArm, wristAngles } from '../src/swatter/armgeom';
 
@@ -167,6 +167,64 @@ test('resting swatter against a cupboard top and in a corner holds still (no sha
     }
     assert.ok(maxStep < 0.003, `${name}: head moves ${(maxStep * 1000).toFixed(1)} mm in one frame`);
     assert.ok(worst <= 0.004, `${name}: inside the geometry by ${(worst * 1000).toFixed(1)} mm`);
+  }
+});
+
+/** Camera at (2, 1.62, 2) turned yawDeg from +x (positive toward -z) and pitched up pitchDeg, as Session.camFrame. */
+function view(yawDeg: number, pitchDeg: number): CamFrame {
+  const yaw = yawDeg * Math.PI / 180, p = pitchDeg * Math.PI / 180;
+  const f = { x: Math.cos(yaw) * Math.cos(p), y: Math.sin(p), z: -Math.sin(yaw) * Math.cos(p) }, r = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) };
+  return { eye: { x: 2, y: 1.62, z: 2 }, f, r, up: { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x } };
+}
+const dist = (a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+test('turning past a wall cupboard with a bevelled edge, the resting swatter does not jump', () => {
+  // the wire grazing the 2 mm bevel on the cupboard's bottom front edge read as 14-38 cm deep, and the swatter jumped
+  // that far in one frame (chalet: every breath at one spot, 239 of 780 turns)
+  const floor = { min: [-3.1, -0.1, -3.1], max: [9.1, 0, 9.1], kind: 1, cls: 1 } as const;
+  for (const [yb, dx, pitch, hand] of [[1.3, 0.35, 20, 1], [1.4, 0.35, 30, 1], [1.3, 0.45, 20, -1], [1.4, 0.25, 20, 1]]) {
+    const xf = 2 + dx, xb = xf + 0.33, yt = yb + 0.79;
+    const bvh = prismToBVH([[xf + 0.002, yb], [xb, yb], [xb, yt], [xf, yt], [xf, yb + 0.002]], 0.8, 3.2, [{ ...floor, min: [...floor.min], max: [...floor.max] }]);
+    const sys = new SwingSystem(bvh, noDoors);
+    let prevShown = null as null | { x: number; y: number; z: number }, prevRest = prevShown, worst = 0;
+    for (let i = 0; i < 300; i++) {
+      const c = view(i < 60 ? -60 : -60 + (i - 60) * 0.5, pitch);   // still, then 30 deg/s across the cupboard's front
+      const rest = sys.restFor(c, hand, i / 60);
+      sys.update(1 / 60, rest, [], c, hand);
+      if (prevShown && prevRest && i > 60) worst = Math.max(worst, dist(sys.pose.h, prevShown) - dist(rest.h, prevRest));
+      prevShown = { ...sys.pose.h }; prevRest = { ...rest.h };
+    }
+    assert.ok(worst < 0.03, `bottom ${yb} m, ${dx} m ahead, pitch ${pitch}, hand ${hand}: the shown head moved ${(worst * 1000).toFixed(0)} mm more than the rest pose in one frame`);
+  }
+});
+
+test('a door leaf swinging into the resting swatter pushes it out at once', () => {
+  // (a limit of 2 cm a frame on every new correction at rest let the leaf pass up to 45 cm into the swatter)
+  const deg = Math.PI / 180;
+  for (const [hx, a1, hand] of [[2.3, 150, 1], [2.42, 150, 1], [2.3, -150, -1]]) {
+    const hz = hand > 0 ? 2.9 : 1.1;
+    let ang = 0, stopped = false;
+    const door = (o: { x: number; y: number; z: number }, d: { x: number; y: number; z: number }, max: number) => {
+      const ex = Math.cos(ang) * 0.8, ez = -Math.sin(ang) * 0.8, den = d.x * ez - d.z * ex;
+      if (Math.abs(den) < 1e-9) return max;
+      const wx = hx - o.x, wz = hz - o.z, t = (wx * ez - wz * ex) / den, s = (wx * d.z - wz * d.x) / den;
+      return t < 0 || t > max || s < 0 || s > 1 || o.y + d.y * t > 2.2 ? max : t;
+    };
+    const c = view(0, 0), sys = new SwingSystem(boxesToBVH([{ min: [-3.1, -0.1, -3.1], max: [9.1, 0, 9.1], kind: 1, cls: 1 }]), door);
+    const { fwd, right } = bodyFrame(c.f, c.r), S = shoulderAt(c.eye, fwd, right, hand);
+    let worst = 0;
+    for (let i = 0; i < 200; i++) {
+      if (i >= 30 && !stopped) {
+        // Core.updateDoors: eased, at most 2.4 rad/s, stopped by the player
+        let next = ang + (a1 * deg - ang) * (1 - Math.exp(-6 / 60));
+        next = ang + Math.max(-2.4 / 60, Math.min(2.4 / 60, next - ang));
+        const ex = Math.cos(next) * 0.8, ez = -Math.sin(next) * 0.8, t = Math.max(0, Math.min(1, ((2 - hx) * ex + (2 - hz) * ez) / (ex * ex + ez * ez)));
+        if (Math.hypot(2 - hx - ex * t, 2 - hz - ez * t) < 0.23) stopped = true; else ang = next;
+      }
+      sys.update(1 / 60, sys.restFor(c, hand, i / 60), [], c, hand);
+      worst = Math.max(worst, sys.penetration(sys.pose, S, undefined, hand).depth);
+    }
+    assert.ok(worst <= 0.005, `hinge (${hx}, ${hz}) to ${a1} deg: the swatter was ${(worst * 1000).toFixed(0)} mm inside the door leaf`);
   }
 });
 

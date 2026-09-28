@@ -38,8 +38,12 @@ export class AudioEngine {
     this.reverb = c.createConvolver(); this.reverb.buffer = this.roomIR(0.38, 0.9);
     this.reverbIn = c.createGain(); this.reverbIn.gain.value = 0.16; this.reverbIn.connect(this.reverb); this.reverb.connect(this.master);
     this.noise = this.makeNoise(2.0);
-    for (const m of Object.keys(MODES)) this.slaps.set(m, [0, 1, 2].map((k) => this.buffer(synthSlap(m, k, c.sampleRate))));
     this.thumpsFor('panel');                                                  // the door; others on first use
+    // the slaps: one material per task after the tap (all of them in the tap made a cold start ~20 ms slower than
+    // before); a slap needed sooner is built on the spot
+    const todo = ['wall', 'wood', 'panel', ...Object.keys(MODES)];
+    const fill = () => { let m = todo.shift(); while (m && this.slaps.has(m)) m = todo.shift(); if (m) { this.slapsFor(m); setTimeout(fill, 20); } };
+    setTimeout(fill, 20);
     try {
       await c.audioWorklet.addModule(import.meta.env.BASE_URL + 'audio/buzz-worklet.js');
       this.workletReady = true;
@@ -122,6 +126,7 @@ export class AudioEngine {
   /** Swatter slap at world position; speed m/s; surface class. killed adds a tiny squash. */
   swat(surface: Surface, speed: number, x: number, y: number, z: number, killed = false) {
     const m = MODES[surface] ? surface : (ALIAS[surface] ?? 'panel');
+    this.slapsFor(m);
     this.play(this.slaps, m, Math.min(1.3, 0.25 + speed / 9) * (m === 'fabric' ? 0.6 : 1), x, y, z);
     if (killed && this.ctx && this.enabled) this.noiseBurst(x, y, z, 5200, 3, 0.006, 0.05);
   }
@@ -131,6 +136,10 @@ export class AudioEngine {
     const m = MODES[surface] ? surface : 'panel';
     this.thumpsFor(m);
     this.play(this.thumps, m, Math.min(1.3, 0.25 + speed / 9), x, y, z);
+  }
+
+  private slapsFor(m: string) {
+    if (this.ctx && !this.slaps.has(m)) this.slaps.set(m, [0, 1, 2].map((k) => this.buffer(synthSlap(m, k, this.ctx!.sampleRate))));
   }
 
   private thumpsFor(m: string) {

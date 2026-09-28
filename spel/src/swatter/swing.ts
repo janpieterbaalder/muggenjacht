@@ -149,6 +149,7 @@ export interface Swing {
 }
 
 const hit: RayHit = { t: 0, tri: 0, nx: 0, ny: 0, nz: 0 };
+const gn = [0, 0, 0];
 
 export class SwingSystem {
   swing: Swing | null = null;
@@ -341,31 +342,96 @@ export class SwingSystem {
     return { pts, parent };
   }
 
-  /** Deepest penetration of the swatter chain into the world: a segment of the chain that crosses a surface puts the
-   * points beyond it inside or behind that object. Returns the depth (m) of the deepest such point behind the crossed
-   * surface and that surface's normal (facing the free side). Segments leaving an object (exit faces) give no depth. */
-  penetration(p: Pose, S: V3, off: V3 = v(), hand = 1): { depth: number; n: V3 } {
+  /** Deepest penetration of the swatter chain into the world. Each segment of the chain (from the shoulder, always free
+   * space, outward) is followed through the surfaces it crosses going in (against the face's outward normal: the
+   * collision mesh is wound outward; a door leaf, which has no thickness, counts either way). How deep the chain is
+   * behind such a face: where the segment comes out again, at the segment's end if it is still inside (as far as a ray
+   * from it toward the free side runs before it leaves the object), and at chain points further on that the face
+   * covers and the object hides from the shoulder (a head through a thin wall). The face's plane alone says nothing
+   * past its edge: grazing the 2 mm bevel on a wall cupboard's edge read as 18 cm deep and the resting swatter jumped
+   * 18 cm; and a head held over a worktop the neck crosses is not 18 cm under it. The line shoulder-grip stands in for
+   * the arm, which bends around a pipe or a rail: it counts only by where the hand ends up. Returns the depth (m), that
+   * face's normal (free side) and whether it is a door leaf. */
+  penetration(p: Pose, S: V3, off: V3 = v(), hand = 1): { depth: number; n: V3; door: boolean } {
     const { pts: raw, parent } = this.chain(p, S, hand);
     const pts = raw.map((q, i) => (i === 0 ? q : add(q, off)));
-    let depth = 0, nrm = v();
+    let depth = 0, nrm = v(), byDoor = false;
+    const deeper = (dd: number, n: V3, door: boolean) => { if (dd > depth) { depth = dd; nrm = n; byDoor = door; } };
+    const below = (i: number, j: number) => { for (let k = j; k >= 0; k = parent[k]) if (k === i) return true; return false; };
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[parent[i]], b = pts[i], d = sub(b, a), L = len(d);
+      if (L < 1e-6) continue;
+      const dn = v(d.x / L, d.y / L, d.z / L);
+      // every crossing going in along the segment
+      for (let s = 0, k = 0; k < 8 && s < L; k++) {
+        const o = add(a, dn, s);
+        let t = L - s, n = v(), door = false;
+        if (this.bvh.raycast(o.x, o.y, o.z, dn.x, dn.y, dn.z, t, hit, 15)) { t = hit.t; this.bvh.normal(hit.tri, gn); n = v(gn[0], gn[1], gn[2]); }
+        const td = this.doorRay(o, dn, t);
+        if (td < t) { t = td; n = v(-dn.x, -dn.y, -dn.z); door = true; }
+        if (t >= L - s) break;
+        t += s;
+        if (!door && dot(n, dn) >= 0) { s = t + 1e-4; continue; }
+        const hp = add(a, dn, t);
+        if (door) {
+          // a door leaf: everything past it, as before
+          for (let j = i; j < pts.length; j++) if (below(i, j)) deeper(dot(sub(hp, pts[j]), n), n, true);
+          break;
+        }
+        // where the segment comes out again, or its end if still inside
+        const x = add(hp, dn, 1e-4);
+        let out = L;
+        if (this.bvh.raycast(x.x, x.y, x.z, dn.x, dn.y, dn.z, L - t - 1e-4, hit, 15)) { out = t + 1e-4 + hit.t; if (i > 1) deeper(dot(sub(hp, add(a, dn, out)), n), n, false); }
+        else {
+          const dd = dot(sub(hp, b), n), far = Math.max(0, dd) + 0.05;
+          if (this.bvh.raycast(b.x, b.y, b.z, n.x, n.y, n.z, far, hit, 15)) {
+            this.bvh.normal(hit.tri, gn);
+            if (gn[0] * n.x + gn[1] * n.y + gn[2] * n.z > 0) deeper(Math.min(dd, hit.t), n, false);
+          }
+        }
+        // chain points further on, behind the face where it covers them and hidden from the shoulder by the object
+        for (let j = i; j < pts.length; j++) {
+          if (!below(i, j)) continue;
+          const q = pts[j], dd = dot(sub(hp, q), n);
+          if (dd <= depth) continue;
+          const f = add(q, n, dd + 0.002);
+          if (!this.bvh.raycast(f.x, f.y, f.z, -n.x, -n.y, -n.z, 0.004, hit, 15)) continue;
+          this.bvh.normal(hit.tri, gn);
+          if (gn[0] * n.x + gn[1] * n.y + gn[2] * n.z <= 0.99) continue;
+          const w = sub(q, S), lw = len(w);
+          if (lw > 1e-6 && this.bvh.raycast(S.x, S.y, S.z, w.x / lw, w.y / lw, w.z / lw, lw, hit, 15)) deeper(dd, n, false);
+        }
+        s = out + 1e-4;
+      }
+    }
+    return { depth, n: nrm, door: byDoor };
+  }
+
+  /** The measure of before: every first crossing of a segment, and every chain point further on as deep as it lies behind
+   * that face's plane. It overshoots past small faces, but a push-out by it lands clear of everything around - what the
+   * fallback below needs (with the measure above it left the swatter wedged in a bathroom corner, 2-4 cm inside). */
+  private penetrationFar(p: Pose, S: V3, off: V3, hand: number): { depth: number; n: V3; door: boolean } {
+    const { pts: raw, parent } = this.chain(p, S, hand);
+    const pts = raw.map((q, i) => (i === 0 ? q : add(q, off)));
+    let depth = 0, nrm = v(), byDoor = false;
     const below = (i: number, j: number) => { for (let k = j; k >= 0; k = parent[k]) if (k === i) return true; return false; };
     for (let i = 1; i < pts.length; i++) {
       const a = pts[parent[i]], d = sub(pts[i], a), L = len(d);
       if (L < 1e-6) continue;
       const dn = v(d.x / L, d.y / L, d.z / L);
-      let t = L, n = v();
+      let t = L, n = v(), door = false;
       if (this.bvh.raycast(a.x, a.y, a.z, dn.x, dn.y, dn.z, L, hit, 15)) { t = hit.t; n = v(hit.nx, hit.ny, hit.nz); }
       const td = this.doorRay(a, dn, t);
-      if (td < t) { t = td; n = v(-dn.x, -dn.y, -dn.z); }
+      if (td < t) { t = td; n = v(-dn.x, -dn.y, -dn.z); door = true; }
       if (t >= L) continue;
       const hp = add(a, dn, t);
       for (let j = i; j < pts.length; j++) {
         if (!below(i, j)) continue;
         const dd = dot(sub(hp, pts[j]), n);
-        if (dd > depth) { depth = dd; nrm = n; }
+        if (dd > depth) { depth = dd; nrm = n; byDoor = door; }
       }
     }
-    return { depth, n: nrm };
+    return { depth, n: nrm, door: byDoor };
   }
 
   /** Keep the shown swatter out of the world (D48 follow-up: it partly vanished into furniture and walls). The chain
@@ -374,9 +440,12 @@ export class SwingSystem {
    * allowed, and merely being hidden behind something (a chair back) is not a fault. The correction is applied at once
    * and released smoothly - but only as far as the swatter stays clear: a correction that is still needed is kept.
    * Letting it go every frame and pushing out again made the swatter shake against furniture and in corners (up to
-   * 13 cm per frame at a cupboard top, where the push-out alternated between the top and the front face). */
+   * 13 cm per frame at a cupboard top, where the push-out alternated between the top and the front face). At rest a
+   * new correction comes in at most 2 cm per frame plus twice the pose's own motion: a jump of a swatter held still
+   * reads as a glitch - except when a door leaf pushes it, which sweeps faster than that and must not pass through. */
   private corr = v();
-  private holdFrames = 0; private holdAt: V3 | null = null;
+  private holdFrames = 0; private holdAt: V3 | null = null; private lastIn: V3 | null = null;
+  private stuck = 0; private stuckAt: V3 | null = null; private restFree = false;
   private restK = -1; private restT = 0;
   resolve(p: Pose, c: CamFrame, hand: number, dt: number, resting = false): Pose {
     const { fwd, right } = bodyFrame(c.f, c.r);
@@ -384,18 +453,25 @@ export class SwingSystem {
     const tol = 0.0005;
     const cl = len(this.corr);
     let off = this.corr;
+    // (the depth where the swatter is now, measured once a frame)
+    let here: ReturnType<SwingSystem['penetration']> | null = null;
+    const at = (o: V3) => (o === this.corr ? (here ??= this.penetration(p, S, o, hand)) : this.penetration(p, S, o, hand));
     if (cl > 1e-6) {
       // in a swing the correction is let go quickly (the swing's own path is planned clear of the world)
       if (!resting) off = lerp3(this.corr, v(), 1 - Math.exp(-dt / 0.08));
       else {
-        // at rest: at most 18 cm/s, and only as far as the swatter stays clear with 1 cm to spare in that direction -
-        // letting go right up to the object made it creep along an edge, where the crossing test flips, and it was
-        // pushed back in small jolts
+        // at rest: at most 18 cm/s plus 3x the correction per second, and only as far as the swatter stays clear with
+        // 1 cm to spare in that direction - letting go right up to the object made it creep along an edge, where the
+        // crossing test flips, and it was pushed back in small jolts (at a flat 18 cm/s a correction of 20-30 cm, built
+        // up turning next to a wall, kept the swatter that far from the hand for seconds)
         // (a failed try is repeated only every 4th frame while the swatter stays put: pressed into a corner the tries
         // tripled the cost of the resting swatter)
+        // (not while the swatter is not clear where it is: wedged between two faces a release that came free for one
+        // breath flipped it 4 mm to and fro)
         if (this.holdFrames > 0 && this.holdAt && len(sub(p.h, this.holdAt)) < 0.005) this.holdFrames--;
+        else if (at(this.corr).depth > tol) { /* not clear here: pushed out below */ }
         else {
-          const rel = Math.min(1 - Math.exp(-dt / 0.08), 0.18 * dt / cl);
+          const rel = Math.min(1 - Math.exp(-dt / 0.08), (0.18 + 3 * cl) * dt / cl);
           this.holdFrames = 3; this.holdAt = p.h;
           for (const k of [1, 0.5, 0.25]) {
             const cand = lerp3(this.corr, v(), rel * k), spare = lerp3(this.corr, v(), Math.min(1, rel * k + 0.01 / cl));
@@ -404,27 +480,43 @@ export class SwingSystem {
         }
       }
     }
+    // pushed out past a door jamb (the arm reached through the doorway) and the arm's own pose is free again, but the
+    // way back runs through the wall: after 0.25 s at rest it comes back through it (as fast as the limit below allows)
+    // - holding on kept it up to 50 cm from the hand for seconds while turning in a doorway
+    // (whether the arm's own pose is free is measured again only once it has moved 5 mm)
+    if (resting && off === this.corr && cl > 0.1) {
+      if (!this.stuckAt || len(sub(p.h, this.stuckAt)) > 0.005) { this.restFree = this.penetration(p, S, v(), hand).depth <= tol; this.stuckAt = p.h; }
+      this.stuck = this.restFree ? this.stuck + 1 : 0;
+    } else this.stuck = 0;
+    if (this.stuck >= 15) { off = v(); this.holdFrames = 0; }
     // push out just to the surface, so a slowly moving pose (breathing) is followed smoothly instead of in steps
-    let clear = false;
+    let clear = false, door = false;
     for (let it = 0; it < 6; it++) {
-      const { depth, n } = this.penetration(p, S, off, hand);
-      if (depth <= tol) { clear = true; break; }
-      off = add(off, n, depth + tol);
+      const r = at(off);
+      if (r.depth <= tol) { clear = true; break; }
+      off = add(off, r.n, r.depth + tol); door ||= r.door;
     }
     // in a tight spot the push-outs can chase each other between surfaces without getting clear: the resting swatter
     // then tries once from no correction at all, and failing that stays where it was (unless that is clearly worse)
     // instead of hopping 10-30 cm from frame to frame
+    // (where it was is kept, too, when that is within the coarser tolerance of the fresh try: wedged between two faces
+    // each breath found another fresh answer 4 mm away)
+    if (!clear && resting && cl > 1e-6 && at(this.corr).depth <= 0.003) { off = this.corr; clear = true; }
     if (!clear && resting) {
-      // (with the coarser steps of before: 4 mm past each crossed surface)
+      // (with the coarser steps and the measure of before: 4 mm past each crossed surface)
       let fresh = v();
       for (let it = 0; it < 8; it++) {
-        const { depth, n } = this.penetration(p, S, fresh, hand);
-        if (depth <= 0.003) { clear = true; break; }
-        fresh = add(fresh, n, depth + 0.004);
+        const r = this.penetrationFar(p, S, fresh, hand);
+        if (r.depth <= 0.003) { clear = true; break; }
+        fresh = add(fresh, r.n, r.depth + 0.004); door ||= r.door;
       }
       if (clear) off = fresh;
-      else if (cl > 1e-6 && this.penetration(p, S, this.corr, hand).depth <= this.penetration(p, S, off, hand).depth + 0.01) off = this.corr;
+      else if (cl > 1e-6 && at(this.corr).depth <= at(off).depth + 0.01) off = this.corr;
     }
+    const moved = this.lastIn ? len(sub(p.h, this.lastIn)) : 1;
+    this.lastIn = p.h;
+    const dOff = sub(off, this.corr), dl = len(dOff), lim = 0.02 + 2 * moved;
+    if (resting && !door && dl > lim) off = add(this.corr, dOff, lim / dl);
     this.corr = len(off) < 1e-5 ? v() : off;
     if (len(this.corr) < 1e-5) return p;
     return finishPose(add(p.h, this.corr), p.n, p.u, p.flex);
