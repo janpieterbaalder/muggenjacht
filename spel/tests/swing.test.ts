@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { boxesToBVH } from './helpers';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { boxesToBVH, prismToBVH } from './helpers';
 import { SwingSystem, restPose, type CamFrame, type MosquitoTarget, type ContactInfo } from '../src/swatter/swing';
-import { ARM_PLAN_MAX, WRIST, armPole, bodyFrame, handOnHandle, shoulderAt, solveArm, wristAngles } from '../src/swatter/armgeom';
+import { parseCollision } from '../src/physics/bvh';
+import { ARM_PLAN_MAX, WRIST, armPole, bodyFrame, handOnHandle, lookTiptoe, shoulderAt, solveArm, wristAngles } from '../src/swatter/armgeom';
 
 const cam: CamFrame = { eye: { x: 2, y: 1.6, z: 2 }, f: { x: 1, y: 0, z: 0 }, r: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 } };
 const noDoors = (_o: unknown, _d: unknown, max: number) => max;
@@ -142,4 +145,151 @@ test('whole swing near a table edge: never inside it, contact still on the wall'
   let rawWorst = 0;
   for (let i = 0; i < 70; i++) { raw.update(1 / 60, restPose(cam, 1, i / 60, { x: 0, y: 0, z: 0 }), []); rawWorst = Math.max(rawWorst, depthIn(bvh, raw.pose)); }
   assert.ok(rawWorst > 0.01, `setup: unguarded swing depth ${rawWorst}`);
+});
+
+test('resting swatter against a cupboard top and in a corner holds still (no shaking)', () => {
+  // standing 0.3 m from a 1.40 m cupboard looking a little down, and 0.25 m from a corner: the push-out used to be let
+  // go and applied again every frame and alternated between surfaces - up to 127 mm per frame at the cupboard
+  const floor = { min: [-0.1, -0.1, -0.1], max: [6.1, 0, 6.1], kind: 1, cls: 1 } as const;
+  const cases: [string, { min: [number, number, number]; max: [number, number, number] }[], number][] = [
+    ['cupboard', [{ ...floor, min: [...floor.min], max: [...floor.max] }, { min: [2.3, 0, 1], max: [3.0, 1.4, 3] }], -10],
+    ['corner', [{ ...floor, min: [...floor.min], max: [...floor.max] }, { min: [2.25, 0, -1], max: [2.35, 2.4, 5] }, { min: [-1, 0, 2.25], max: [5, 2.4, 2.35] }], 0],
+  ];
+  for (const [name, boxes, pitchDeg] of cases) {
+    const p = pitchDeg * Math.PI / 180;
+    const c: CamFrame = { eye: cam.eye, f: { x: Math.cos(p), y: Math.sin(p), z: 0 }, r: cam.r, up: { x: -Math.sin(p), y: Math.cos(p), z: 0 } };
+    const bvh = boxesToBVH(boxes);
+    const sys = new SwingSystem(bvh, noDoors);
+    let prev: { x: number; y: number; z: number } | null = null, maxStep = 0, worst = 0;
+    for (let i = 0; i < 300; i++) {
+      sys.update(1 / 60, sys.restFor(c, 1, i / 60), [], c, 1);
+      const h = sys.pose.h;
+      if (prev && i > 30) maxStep = Math.max(maxStep, Math.hypot(h.x - prev.x, h.y - prev.y, h.z - prev.z));
+      if (i > 30) { const { fwd, right } = bodyFrame(c.f, c.r); worst = Math.max(worst, new SwingSystem(bvh, noDoors).penetration(sys.pose, shoulderAt(c.eye, fwd, right, 1)).depth); }
+      prev = { ...h };
+    }
+    assert.ok(maxStep < 0.003, `${name}: head moves ${(maxStep * 1000).toFixed(1)} mm in one frame`);
+    assert.ok(worst <= 0.004, `${name}: inside the geometry by ${(worst * 1000).toFixed(1)} mm`);
+  }
+});
+
+/** Camera at (2, 1.62, 2) turned yawDeg from +x (positive toward -z) and pitched up pitchDeg, as Session.camFrame. */
+function view(yawDeg: number, pitchDeg: number): CamFrame {
+  const yaw = yawDeg * Math.PI / 180, p = pitchDeg * Math.PI / 180;
+  const f = { x: Math.cos(yaw) * Math.cos(p), y: Math.sin(p), z: -Math.sin(yaw) * Math.cos(p) }, r = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) };
+  return { eye: { x: 2, y: 1.62, z: 2 }, f, r, up: { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x } };
+}
+const dist = (a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+test('turning past a wall cupboard with a bevelled edge, the resting swatter does not jump', () => {
+  // the wire grazing the 2 mm bevel on the cupboard's bottom front edge read as 14-38 cm deep, and the swatter jumped
+  // that far in one frame (chalet: every breath at one spot, 239 of 780 turns)
+  const floor = { min: [-3.1, -0.1, -3.1], max: [9.1, 0, 9.1], kind: 1, cls: 1 } as const;
+  for (const [yb, dx, pitch, hand] of [[1.3, 0.35, 20, 1], [1.4, 0.35, 30, 1], [1.3, 0.45, 20, -1], [1.4, 0.25, 20, 1]]) {
+    const xf = 2 + dx, xb = xf + 0.33, yt = yb + 0.79;
+    const bvh = prismToBVH([[xf + 0.002, yb], [xb, yb], [xb, yt], [xf, yt], [xf, yb + 0.002]], 0.8, 3.2, [{ ...floor, min: [...floor.min], max: [...floor.max] }]);
+    const sys = new SwingSystem(bvh, noDoors);
+    let prevShown = null as null | { x: number; y: number; z: number }, prevRest = prevShown, worst = 0;
+    for (let i = 0; i < 300; i++) {
+      const c = view(i < 60 ? -60 : -60 + (i - 60) * 0.5, pitch);   // still, then 30 deg/s across the cupboard's front
+      const rest = sys.restFor(c, hand, i / 60);
+      sys.update(1 / 60, rest, [], c, hand);
+      if (prevShown && prevRest && i > 60) worst = Math.max(worst, dist(sys.pose.h, prevShown) - dist(rest.h, prevRest));
+      prevShown = { ...sys.pose.h }; prevRest = { ...rest.h };
+    }
+    assert.ok(worst < 0.03, `bottom ${yb} m, ${dx} m ahead, pitch ${pitch}, hand ${hand}: the shown head moved ${(worst * 1000).toFixed(0)} mm more than the rest pose in one frame`);
+  }
+});
+
+test('standing still before a wall cupboard in the chalet, the resting swatter stays put', () => {
+  // its wire grazes the cupboard's 2 mm bevel with every breath: 18 cm jumps with the measure of before, and still a 2 cm
+  // step each breath with that measure and a limit on the correction (a real spot of the collision mesh)
+  const buf = readFileSync(join(process.cwd(), 'public', 'assets', 'chalet_coll.bin'));
+  const bvh = parseCollision(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  const yaw = 135 * Math.PI / 180, p = 20 * Math.PI / 180;
+  const f = { x: Math.cos(yaw) * Math.cos(p), y: Math.sin(p), z: -Math.sin(yaw) * Math.cos(p) }, r = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) };
+  const c: CamFrame = { eye: { x: 5.0112, y: 1.62, z: -2.9809 }, f, r, up: { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x } };
+  const sys = new SwingSystem(bvh, noDoors);
+  let prev = null as null | { x: number; y: number; z: number }, worst = 0;
+  for (let i = 0; i < 600; i++) {
+    sys.update(1 / 60, sys.restFor(c, 1, i / 60), [], c, 1);
+    if (prev && i > 60) worst = Math.max(worst, dist(sys.pose.h, prev));
+    prev = { ...sys.pose.h };
+  }
+  assert.ok(worst < 0.003, `the head moved ${(worst * 1000).toFixed(1)} mm in one frame`);
+});
+
+test('a door leaf swinging into the resting swatter pushes it out at once', () => {
+  // (a limit of 2 cm a frame on every new correction at rest let the leaf pass up to 45 cm into the swatter)
+  const deg = Math.PI / 180;
+  for (const [hx, a1, hand] of [[2.3, 150, 1], [2.42, 150, 1], [2.3, -150, -1]]) {
+    const hz = hand > 0 ? 2.9 : 1.1;
+    let ang = 0, stopped = false;
+    const door = (o: { x: number; y: number; z: number }, d: { x: number; y: number; z: number }, max: number) => {
+      const ex = Math.cos(ang) * 0.8, ez = -Math.sin(ang) * 0.8, den = d.x * ez - d.z * ex;
+      if (Math.abs(den) < 1e-9) return max;
+      const wx = hx - o.x, wz = hz - o.z, t = (wx * ez - wz * ex) / den, s = (wx * d.z - wz * d.x) / den;
+      return t < 0 || t > max || s < 0 || s > 1 || o.y + d.y * t > 2.2 ? max : t;
+    };
+    const c = view(0, 0), sys = new SwingSystem(boxesToBVH([{ min: [-3.1, -0.1, -3.1], max: [9.1, 0, 9.1], kind: 1, cls: 1 }]), door);
+    const { fwd, right } = bodyFrame(c.f, c.r), S = shoulderAt(c.eye, fwd, right, hand);
+    let worst = 0;
+    for (let i = 0; i < 200; i++) {
+      if (i >= 30 && !stopped) {
+        // Core.updateDoors: eased, at most 2.4 rad/s, stopped by the player
+        let next = ang + (a1 * deg - ang) * (1 - Math.exp(-6 / 60));
+        next = ang + Math.max(-2.4 / 60, Math.min(2.4 / 60, next - ang));
+        const ex = Math.cos(next) * 0.8, ez = -Math.sin(next) * 0.8, t = Math.max(0, Math.min(1, ((2 - hx) * ex + (2 - hz) * ez) / (ex * ex + ez * ez)));
+        if (Math.hypot(2 - hx - ex * t, 2 - hz - ez * t) < 0.23) stopped = true; else ang = next;
+      }
+      sys.update(1 / 60, sys.restFor(c, hand, i / 60), [], c, hand);
+      worst = Math.max(worst, sys.penetration(sys.pose, S, undefined, hand).depth);
+    }
+    assert.ok(worst <= 0.005, `hinge (${hx}, ${hz}) to ${a1} deg: the swatter was ${(worst * 1000).toFixed(0)} mm inside the door leaf`);
+  }
+});
+
+test('a mosquito on the 2.31 m ceiling is reachable looking up from nearby (on the toes), not from afar', () => {
+  // it stayed ~9 cm out of reach even looking straight up: no rise onto the toes in the view, no shoulder lift
+  const ceiling = () => boxesToBVH([{ min: [-0.1, -0.1, -0.1], max: [6.1, 0, 6.1], kind: 1, cls: 1 }, { min: [-0.1, 2.31, -0.1], max: [6.1, 2.41, 6.1] }]);
+  const swingAt = (pitchDeg: number, hand: number) => {
+    const p = pitchDeg * Math.PI / 180, toes = lookTiptoe(p);
+    const c: CamFrame = { eye: { x: 3, y: 1.62 + toes, z: 3 }, f: { x: Math.cos(p), y: Math.sin(p), z: 0 }, r: { x: 0, y: 0, z: 1 }, up: { x: -Math.sin(p), y: Math.cos(p), z: 0 }, tiptoe: toes };
+    const sys = new SwingSystem(ceiling(), noDoors);
+    assert.ok(sys.begin(c, c.f, hand, 0, [], 0.32));
+    let got: ContactInfo | null = null;
+    for (let i = 0; i < 60; i++) { const g = sys.update(1 / 60, restPose(c, hand, i / 60, { x: 0, y: 0, z: 0 }), []); if (g && !got) got = g; }
+    return got;
+  };
+  for (const hand of [1, -1]) for (const pitch of [55, 65, 75]) {
+    const c = swingAt(pitch, hand);
+    assert.ok(c && !c.air && Math.abs(c.point.y - 2.31) < 0.02, `hand ${hand}, looking up ${pitch} deg: ${c ? (c.air ? 'air at ' + c.point.y.toFixed(2) : 'hit y ' + c.point.y.toFixed(2)) : 'no swing'}`);
+  }
+  // 0.8 m away (looking up only 35 deg) the arm is not stretched beyond its length: step closer
+  const far = swingAt(35, 1);
+  assert.ok(far && far.air, 'far ceiling point: air swing');
+});
+
+test('flying mosquitoes stay in reach at 1.0-1.15 m (the wire may bend in a fast air swing)', () => {
+  // capping the handle bend for air swings (the wire "has nothing to bend it") cut hits at 1.0 m by half
+  const floorOnly = () => boxesToBVH([{ min: [-0.1, -0.1, -0.1], max: [6.1, 0, 6.1], kind: 1, cls: 1 }]);
+  const hits = (D: number) => {
+    let n = 0;
+    for (const hand of [1, -1]) for (const pd of [-30, -15, 0, 15, 30]) for (let a = -2; a <= 2; a++) for (let e = -2; e <= 2; e++) {
+      const p = pd * Math.PI / 180, y = a * 12 * Math.PI / 180;
+      const f = { x: Math.cos(y) * Math.cos(p), y: Math.sin(p), z: -Math.sin(y) * Math.cos(p) }, r = { x: Math.sin(y), y: 0, z: Math.cos(y) };
+      const up = { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x };
+      const c: CamFrame = { eye: { x: 3, y: 1.62, z: 3 }, f, r, up };
+      const d0 = { x: f.x + up.x * e * 0.1, y: f.y + up.y * e * 0.1, z: f.z + up.z * e * 0.1 }, l = Math.hypot(d0.x, d0.y, d0.z), d = { x: d0.x / l, y: d0.y / l, z: d0.z / l };
+      const pos = { x: 3 + d.x * D, y: 1.62 + d.y * D, z: 3 + d.z * D };
+      const m: MosquitoTarget[] = [{ idx: 0, pos, prev: pos, alive: true, resting: false, nrm: { x: 0, y: 1, z: 0 } }];
+      const sys = new SwingSystem(floorOnly(), noDoors);
+      if (!sys.begin(c, d, hand, 0, m, 0.32)) continue;
+      for (let i = 0; i < 60; i++) { const g = sys.update(1 / 60, restPose(c, hand, i / 60, { x: 0, y: 0, z: 0 }), m); if (g && g.mosquito === 0) { n++; break; } }
+    }
+    return n;
+  };
+  // (250 directions and hands; before this PR 140 and 70 were hit)
+  assert.ok(hits(1.0) >= 130, `1.0 m: ${hits(1.0)} of 250`);
+  assert.ok(hits(1.15) >= 60, `1.15 m: ${hits(1.15)} of 250`);
 });

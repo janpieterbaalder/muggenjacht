@@ -9,6 +9,7 @@ import { MosquitoBrain, type Threat } from '../mosquito/brain';
 import { MosquitoVisual } from '../mosquito/visual';
 import { SwingSystem, restPose, type CamFrame, type ContactInfo, type MosquitoTarget, type V3 } from '../swatter/swing';
 import { ArmVisual } from '../swatter/visual';
+import { TIPTOE, lookTiptoe } from '../swatter/armgeom';
 import { ROOM_BOXES, roomAt } from '../engine/world';
 import type { RayHit } from '../physics/bvh';
 import { adaptTemperatureTint } from '../engine/whitebalance';
@@ -83,6 +84,8 @@ export class Session {
   exposure = 1;
   private wbMired = 1e6 / 6500; private wbTint = 0;
   private lean = 0; private leanTarget = 0; private crouch = 0; private crouchTarget = 0;
+  /** rise onto the toes (m): looking up, or a high swing */
+  private tiptoe = 0; private toesTarget = 0;
   private incomingLeft = 0; private incomingTimer = 0;
   private stepPhase = 0; private endTimer = -1;
   private idCounter = 1; private whooshed = false;
@@ -216,7 +219,7 @@ export class Session {
     const r = { x: Math.sin(c.yaw), y: 0, z: Math.cos(c.yaw) };
     const up = { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x };
     const p = c.camera.position;
-    return { eye: { x: p.x, y: p.y, z: p.z }, f, r, up };
+    return { eye: { x: p.x, y: p.y, z: p.z }, f, r, up, tiptoe: this.tiptoe };
   }
 
   /** Aim direction through a screen point (CSS px) or the crosshair; limited to the arm's reachable cone. */
@@ -332,7 +335,9 @@ export class Session {
           return !core.world.bvh.raycast(sh.x, sh.y - drop, sh.z, dx / l, dy / l, dz / l, Math.max(0, l - 0.15), hit, 1 | 4 | 8);
         };
         if (!clear(crouch)) for (const extra of [0.15, 0.3, 0.45]) if (clear(crouch + extra)) { crouch += extra; break; }
-        this.crouchTarget = Math.min(0.6, crouch);
+        // a negative crouch is a rise onto the toes, on top of what looking up already gives
+        this.crouchTarget = Math.min(0.6, Math.max(0, crouch));
+        this.toesTarget = Math.min(TIPTOE, this.tiptoe + Math.max(0, -crouch));
       }
     }
     // --- doors
@@ -375,7 +380,11 @@ export class Session {
     const lookCrouch = Math.max(0, Math.min(1, (-core.pitch - 1.0) / 0.3)) * 0.35;
     const crouchGoal = Math.max(inSwing ? this.crouchTarget : 0, lookCrouch);
     this.crouch += (crouchGoal - this.crouch) * (1 - Math.exp(-dt / (crouchGoal > this.crouch ? 0.09 : 0.25)));
-    core.lean.f = this.lean; core.lean.d = this.lean * 0.35 + this.crouch;
+    // toes: looking up (a mosquito on the ceiling) raises the view as standing on tiptoe does; a high swing may rise
+    // the rest of the way
+    const toesGoal = Math.max(lookTiptoe(core.pitch), inSwing ? this.toesTarget : 0);
+    this.tiptoe += (toesGoal - this.tiptoe) * (1 - Math.exp(-dt / (toesGoal > this.tiptoe ? 0.12 : 0.25)));
+    core.lean.f = this.lean; core.lean.d = this.lean * 0.35 + this.crouch - this.tiptoe;
     const rest = this.swing.restFor(cf, hand, this.t);
     const contact = this.swing.update(dt, rest, this.targets(), cf, hand);
     const s = this.swing.swing;

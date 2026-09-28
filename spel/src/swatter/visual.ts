@@ -14,9 +14,12 @@ import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer';
 import { RawTexture } from '@babylonjs/core/Materials/Textures/rawTexture';
 import { Texture } from '@babylonjs/core/Materials/Textures/texture';
-import { ARM_CLEAR, HAND, allocSleeve, armPole, bodyFrame, buildSleeve, buildTorso, clearArmPole, handOnHandle, knitTextures, shoulderAt, solveArm, type TubeBuffers, type ArmJoints, type P3 } from './armgeom';
-import type { Pose, CamFrame } from './swing';
+import { ARM_CLEAR, HAND, allocSleeve, armPole, bodyFrame, buildSleeve, buildTorso, clearArmPole, handOnHandle, knitTextures, shoulderAt, shoulderLift, solveArm, type TubeBuffers, type ArmJoints, type P3 } from './armgeom';
+import { WIRE, wirePoint, type Pose, type CamFrame } from './swing';
 import { ProbeDiffusePlugin } from '../engine/lightmap';
+
+/** rings along the wire handle and sides per ring */
+const WIRE_RINGS = 26, WIRE_SIDES = 8;
 
 /** knitted jumper: heather blue-grey (a plausible choice, not from a photo) */
 const JUMPER = new Color3(0.20, 0.215, 0.235);
@@ -40,6 +43,9 @@ export class ArmVisual {
   armDepth: ((a: P3, b: P3, r: number) => number) | null = null;
   /** smoothed elbow direction (a new clear pose is eased in, no pop) */
   private pole: Vector3 | null = null;
+  /** the wire handle, rebuilt every frame so it can bend (swing.wirePoint) */
+  private wire!: Mesh;
+  private wireBuf!: { positions: Float32Array; normals: Float32Array };
 
   async load(scene: Scene) {
     const res = await ImportMeshAsync(import.meta.env.BASE_URL + 'assets/arm.glb', scene);
@@ -53,6 +59,18 @@ export class ArmVisual {
       return t;
     };
     this.head = mk('mepper_kop'); this.stick = mk('mepper_steel'); this.hand = mk('hand');
+    // the stick's plastic rib is moulded into the head: it goes with the head and never bends (bent along with the
+    // wire it stood out of the head's plane - the head looked crooked on the handle). Slimmer than modelled (21 mm).
+    // The straight wire is replaced by one that bends (built below).
+    const stickParts = [byName('mepper_steel') as AbstractMesh, ...((byName('mepper_steel') as AbstractMesh).getChildMeshes?.() ?? [])].filter((m) => m?.material);
+    const rib = stickParts.find((m) => m.material!.name === 'mepper_kunststof');
+    const wireSrc = stickParts.find((m) => m.material!.name === 'mepper_draad');
+    if (!rib || !wireSrc) throw new Error('arm.glb mist mepper_steel-onderdelen');
+    const ribPivot = new TransformNode('mepper_rib_pivot', scene);
+    ribPivot.parent = this.head; ribPivot.position.set(0, 0, -HAND.neck); ribPivot.scaling.set(0.62, 0.62, 1);
+    rib.parent = ribPivot; rib.position.setAll(0); rib.rotationQuaternion = Quaternion.Identity(); rib.scaling.setAll(1);
+    wireSrc.setEnabled(false);
+    this.buildWire(scene, wireSrc.material as PBRMaterial);
     // the rigid forearm sleeve of arm.glb is replaced by the continuous sleeve below
     const oldSleeve = byName('onderarm') as AbstractMesh | undefined;
     if (oldSleeve) { oldSleeve.setEnabled(false); for (const c of oldSleeve.getChildMeshes()) c.setEnabled(false); }
@@ -65,7 +83,7 @@ export class ArmVisual {
     } catch { /* keep default */ }
     for (const m of res.meshes) {
       m.isPickable = false; m.renderingGroupId = 1;       // drawn after world: never hidden behind near geometry
-      if (m.getTotalVertices() > 0 && m.isEnabled(false) && (!oldSleeve || (m !== oldSleeve && m.parent !== oldSleeve))) this.meshes.push(m);
+      if (m.getTotalVertices() > 0 && m.isEnabled(false) && m !== wireSrc && (!oldSleeve || (m !== oldSleeve && m.parent !== oldSleeve))) this.meshes.push(m);
       const mat = m.material as PBRMaterial | null;
       if (mat instanceof PBRMaterial) {
         mat.environmentIntensity = 1;
@@ -94,10 +112,9 @@ export class ArmVisual {
     // model frame (glTF Y-up of Blender swatter frame): X -> r, Y (Blender Z, face normal) -> n, Z (-Blender Y) -> -u
     const q = basisToQuat(r, n, u.scale(-1));
     this.head.position.copyFrom(V(p.h)); this.head.rotationQuaternion = q;
-    // shaft, grip and hand follow the handle frame (head flexed against the handle about r)
+    // the wire bends from the head's rib to the hand; grip and hand follow the handle frame at the hand
     const hu = V(p.hu), hn = V(p.hn);
-    const neck = V(p.h).add(u.scale(HAND.neck));
-    this.stick.position.copyFrom(neck); this.stick.rotationQuaternion = basisToQuat(r, hn, hu.scale(-1));
+    this.updateWire(p);
     // hand (hammer grip, armgeom.handAxes): model X -> face normal, model Y (palm) -> -r, model Z -> -handle;
     // the left-handed option mirrors the palm axis
     const grip = V(p.grip);
@@ -113,7 +130,9 @@ export class ArmVisual {
     // pressed in rather than drawn inside the wall
     const s0 = shoulderAt(c.eye, bf.fwd, bf.right, hand);
     const inDepth = this.armDepth ? this.armDepth(s0, s0, ARM_CLEAR.shoulder) : 0;
-    const sock = inDepth > 0 ? { x: s0.x - bf.right.x * hand * inDepth, y: s0.y, z: s0.z - bf.right.z * hand * inDepth } : s0;
+    const pressed = inDepth > 0 ? { x: s0.x - bf.right.x * hand * inDepth, y: s0.y, z: s0.z - bf.right.z * hand * inDepth } : s0;
+    // reaching up lifts the shoulder with the shoulder blade (as the strike planner assumes)
+    const sock = { x: pressed.x, y: pressed.y + shoulderLift(pressed, hw.wrist), z: pressed.z };
     const socket = V(sock);
     const pref = armPole(bf.right, hand);
     const want = V(this.armDepth ? clearArmPole(hw.wrist, hw.fdir, sock, pref, this.armDepth) : pref).normalize();
@@ -160,6 +179,52 @@ export class ArmVisual {
     to.material = m; to.alwaysSelectAsActiveMesh = true; to.isPickable = false;
     this.sleeve = sl; this.torso = to;
     this.meshes.push(sl, to);
+  }
+
+  /** Wire handle: a thin tube along swing.wirePoint (rib end -> grip), then straight on into the fist. */
+  private buildWire(scene: Scene, mat: PBRMaterial) {
+    const N = WIRE_RINGS, S = WIRE_SIDES;
+    const idx: number[] = [];
+    for (let j = 0; j < N - 1; j++) for (let i = 0; i < S; i++) {
+      const a = j * S + i, b = j * S + (i + 1) % S, c = a + S, d = b + S;
+      idx.push(a, c, b, b, c, d);
+    }
+    this.wireBuf = { positions: new Float32Array(N * S * 3), normals: new Float32Array(N * S * 3) };
+    const m = new Mesh('mepper_draad_buig', scene);
+    const vd = new VertexData();
+    vd.positions = this.wireBuf.positions; vd.normals = this.wireBuf.normals; vd.indices = idx;
+    vd.applyToMesh(m, true);
+    m.material = mat; m.isPickable = false; m.alwaysSelectAsActiveMesh = true; m.renderingGroupId = 1;
+    this.wire = m; this.meshes.push(m);
+  }
+
+  private updateWire(p: Pose) {
+    const N = WIRE_RINGS, S = WIRE_SIDES, P = this.wireBuf.positions, Nm = this.wireBuf.normals;
+    // centre line: N-2 samples on the bend, then the grip and a point inside the fist
+    const c: P3[] = [];
+    for (let k = 0; k < N - 1; k++) c.push(wirePoint(p, k / (N - 2)));
+    c[N - 2] = p.grip;
+    c.push({ x: p.grip.x + p.hu.x * WIRE.pastGrip, y: p.grip.y + p.hu.y * WIRE.pastGrip, z: p.grip.z + p.hu.z * WIRE.pastGrip });
+    // ring frame: parallel transport from the head's r axis
+    let nx = p.r.x, ny = p.r.y, nz = p.r.z;
+    for (let k = 0; k < N; k++) {
+      const a = c[Math.max(0, k - 1)], b = c[Math.min(N - 1, k + 1)];
+      let tx = b.x - a.x, ty = b.y - a.y, tz = b.z - a.z;
+      const tl = Math.hypot(tx, ty, tz) || 1; tx /= tl; ty /= tl; tz /= tl;
+      const dn = nx * tx + ny * ty + nz * tz;
+      nx -= tx * dn; ny -= ty * dn; nz -= tz * dn;
+      const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+      const bx = ty * nz - tz * ny, by = tz * nx - tx * nz, bz = tx * ny - ty * nx;
+      for (let i = 0; i < S; i++) {
+        const th = i / S * Math.PI * 2, cs = Math.cos(th), sn = Math.sin(th);
+        const ox = nx * cs + bx * sn, oy = ny * cs + by * sn, oz = nz * cs + bz * sn, o = (k * S + i) * 3;
+        P[o] = c[k].x + ox * WIRE.radius; P[o + 1] = c[k].y + oy * WIRE.radius; P[o + 2] = c[k].z + oz * WIRE.radius;
+        Nm[o] = ox; Nm[o + 1] = oy; Nm[o + 2] = oz;
+      }
+    }
+    this.wire.updateVerticesData(VertexBuffer.PositionKind, P);
+    this.wire.updateVerticesData(VertexBuffer.NormalKind, Nm);
+    this.wire.refreshBoundingInfo();
   }
 
   setVisible(v: boolean) { for (const m of this.meshes) m.setEnabled(v); }
