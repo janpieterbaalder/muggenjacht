@@ -317,10 +317,17 @@ export class Session {
     if (inp.swatQueued) {
       inp.swatQueued = false;
       const d = this.aimDir(cf, inp.swatScreen); inp.swatScreen = null;
-      // room to lean the upper body toward the target: what is in front of the chest
+      // room to lean the upper body toward the target: what is in front of the chest; and to step back from a target
+      // too close in front for the swatter's length: what is behind the chest and the head (door leaves included)
       const fx = Math.cos(core.yaw), fz = -Math.sin(core.yaw);
       const leanMax = core.world.bvh.raycast(cf.eye.x, cf.eye.y - 0.35, cf.eye.z, fx, 0, fz, 0.8, hit, 1 | 4 | 8) ? Math.min(0.32, Math.max(0, hit.t - 0.3)) : 0.32;
-      if (this.swing.begin(cf, d, hand, this.t, this.targets(), leanMax)) {
+      let behind = 0.6;
+      for (const y of [cf.eye.y - 0.35, cf.eye.y]) {
+        if (core.world.bvh.raycast(cf.eye.x, y, cf.eye.z, -fx, 0, -fz, behind, hit, 1 | 4 | 8)) behind = hit.t;
+        behind = this.doorRay(cf.eye.x, y, cf.eye.z, -fx, 0, -fz, behind);
+      }
+      const leanBack = Math.min(0.25, Math.max(0, behind - 0.3));
+      if (this.swing.begin(cf, d, hand, this.t, this.targets(), leanMax, leanBack)) {
         core.metrics.event('swing', { t: Math.round(this.t * 100) / 100 }); this.whooshed = false;
         // the body moves first (D48): lean in and bend the knees as far as the planned arm needs
         const sw = this.swing.swing!;
@@ -370,11 +377,11 @@ export class Session {
       m.vis.sync(m.brain, this.t, cf.eye);
     }
     // --- swing physics & contacts (same time step as the mosquito motion)
-    // lean follows the swing: in during wind-up/strike, hold briefly after contact, then straighten up
+    // lean follows the swing: in (or back) during wind-up/strike, hold briefly after contact, then straighten up
     const sw = this.swing.swing;
     const inSwing = !!sw && (sw.phase === 'windup' || sw.phase === 'strike' || sw.t < sw.tContact + 0.12);
     const leanGoal = inSwing ? this.leanTarget : 0;
-    this.lean += (leanGoal - this.lean) * (1 - Math.exp(-dt / (leanGoal > this.lean ? 0.06 : 0.22)));
+    this.lean += (leanGoal - this.lean) * (1 - Math.exp(-dt / (Math.abs(leanGoal) > Math.abs(this.lean) ? 0.06 : 0.22)));
     // knees: during low swings, and when looking steeply down (to look under a bed or table)
     // (only really steep: aiming at a door handle or a low mosquito from close by must not move the view)
     const lookCrouch = Math.max(0, Math.min(1, (-core.pitch - 1.0) / 0.3)) * 0.35;
@@ -384,7 +391,8 @@ export class Session {
     // the rest of the way
     const toesGoal = Math.max(lookTiptoe(core.pitch), inSwing ? this.toesTarget : 0);
     this.tiptoe += (toesGoal - this.tiptoe) * (1 - Math.exp(-dt / (toesGoal > this.tiptoe ? 0.12 : 0.25)));
-    core.lean.f = this.lean; core.lean.d = this.lean * 0.35 + this.crouch - this.tiptoe;
+    // (leaning in lowers the eye; a step back does not)
+    core.lean.f = this.lean; core.lean.d = Math.max(0, this.lean) * 0.35 + this.crouch - this.tiptoe;
     const rest = this.swing.restFor(cf, hand, this.t);
     const contact = this.swing.update(dt, rest, this.targets(), cf, hand);
     const s = this.swing.swing;

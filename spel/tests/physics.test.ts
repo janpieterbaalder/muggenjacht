@@ -124,3 +124,27 @@ test('collision file: MJC2 (16-bit indices) parses to the same BVH as MJC1', asy
   assert.deepEqual([...b.cls], [3, 4]); assert.deepEqual([...b.kind], [0, 2]);
   assert.throws(() => parseCollision(make('MJC9', 4)));
 });
+test('ceiling: closed over every room - also in the niche before the bathroom door, which the export leaves open', async () => {
+  // the export's living-room ceiling ends at the wall line x = 6.19; the niche before the bathroom door (to x = 6.40) had
+  // no ceiling: from the room one looked up into the space under the roof (user feedback 28-09-2026)
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { readCollision, TriBVH } = await import('../src/physics/bvh');
+  const { fillCeilings } = await import('../src/engine/world');
+  const buf = readFileSync(join(process.cwd(), 'public', 'assets', 'chalet_coll.bin'));
+  const { data, fills } = fillCeilings(readCollision(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)));
+  const bvh = new TriBVH(data.pos, data.idx, data.cls, data.kind);
+  // wherever there is a floor under the ceiling height, the ceiling (2.313 m) is right above
+  const open: string[] = [];
+  for (let x = 0.1; x < 8.42; x += 0.04) for (let z = -3.76; z < -0.08; z += 0.04) {
+    if (!bvh.raycast(x, 2.0, z, 0, -1, 0, 2.3, hit, 15)) continue;
+    if (!bvh.raycast(x, 2.0, z, 0, 1, 0, 1.0, hit, 15) || hit.t > 0.34) open.push(`${x.toFixed(2)},${z.toFixed(2)}`);
+  }
+  assert.deepEqual(open, [], 'open ceiling');
+  // the fill faces down (wound outward like the rest), sounds like the ceiling next to it, and is added once only
+  assert.ok(bvh.raycast(6.3, 2.0, -0.7, 0, 1, 0, 1.0, hit, 15) && Math.abs(hit.t - 0.313) < 0.002, 'niche ceiling at 2.313 m');
+  const n = [0, 0, 0], fill = hit.tri, beside = { ...hit }; bvh.normal(fill, n);
+  assert.ok(n[1] < -0.99, 'faces down');
+  assert.ok(bvh.raycast(6.0, 2.0, -0.7, 0, 1, 0, 1.0, beside, 15) && bvh.cls[fill] === bvh.cls[beside.tri] && bvh.kind[fill] === bvh.kind[beside.tri], 'surface class of the living-room ceiling');
+  assert.ok(fills.length <= 1 && fillCeilings(data).fills.length === 0, 'a closed ceiling is not filled again');
+});
