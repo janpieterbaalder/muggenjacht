@@ -177,8 +177,17 @@ export class TriBVH {
   normal(t: number, out: Float32Array | number[]) { const o = t * 12; out[0] = this.tv[o + 9]; out[1] = this.tv[o + 10]; out[2] = this.tv[o + 11]; }
 }
 
+/** Triangles of the collision mesh (Babylon frame), before they go into a BVH. */
+export interface CollisionData { pos: Float32Array; idx: Uint32Array; cls: Uint8Array; kind: Uint8Array; }
+
 /** Parse chalet_coll.bin (Blender z-up) into a BVH in Babylon frame (x, z, -y). */
 export function parseCollision(buf: ArrayBuffer): TriBVH {
+  const d = readCollision(buf);
+  return new TriBVH(d.pos, d.idx, d.cls, d.kind);
+}
+
+/** Read chalet_coll.bin (Blender z-up) into triangles in Babylon frame (x, z, -y). */
+export function readCollision(buf: ArrayBuffer): CollisionData {
   const dv = new DataView(buf);
   const magic = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
   if (magic !== 'MJC1' && magic !== 'MJC2') throw new Error('Onbekend botsingsbestand');
@@ -191,5 +200,5 @@ export function parseCollision(buf: ArrayBuffer): TriBVH {
   const kind = new Uint8Array(buf.slice(off, off + nt));
   const pos = new Float32Array(nv * 3);
   for (let i = 0; i < nv; i++) { pos[3 * i] = raw[3 * i]; pos[3 * i + 1] = raw[3 * i + 2]; pos[3 * i + 2] = -raw[3 * i + 1]; }
-  return new TriBVH(pos, idx, cls, kind);
+  return { pos, idx, cls, kind };
 }

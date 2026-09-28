@@ -19,8 +19,9 @@ import { Plane } from '@babylonjs/core/Maths/math.plane';
 import { BakedLightmapPlugin, LM_STOPS } from './lightmap';
 import { illuminantToTemperatureTint } from './whitebalance';
 import { setImageProcessingQuiet } from './imageprocessing';
-import { parseCollision, type TriBVH } from '../physics/bvh';
+import { readCollision, TriBVH, type CollisionData } from '../physics/bvh';
 import type { Obstacle2D } from '../physics/player';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer';
 
 export type LightState = 'dag' | 'avond' | 'nacht';
 export const ROOM_BOXES: Record<string, [number, number, number, number]> = {
@@ -132,7 +133,8 @@ export async function loadWorld(scene: Scene, onProgress: (f: number, label: str
   ]);
   const meta: LightMeta = { lm: lmMeta as LightMeta['lm'], probes: probeMeta as LightMeta['probes'], sky: skyMeta as LightMeta['sky'],
     illum: illumMeta as LightMeta['illum'], wb: wbMeta as LightMeta['illum'], boxes: (boxMeta as { boxes: LightMeta['boxes'] }).boxes ?? {} };
-  const bvh = parseCollision(collBuf);
+  const coll = fillCeilings(readCollision(collBuf));
+  const bvh = new TriBVH(coll.data.pos, coll.data.idx, coll.data.cls, coll.data.kind);
   const baked = (st: string) => !!meta.lm[st] && !!meta.probes[st];
   for (const [st, atl] of Object.entries(meta.lm)) for (const [a, v] of Object.entries(atl)) {
     if ((v as { enc?: string }).enc !== `log2-${LM_STOPS}`) console.warn(`lichtkaart ${a}_${st}: codering ${(v as { enc?: string }).enc} verwacht log2-${LM_STOPS}`);
@@ -238,6 +240,13 @@ export async function loadWorld(scene: Scene, onProgress: (f: number, label: str
       statics.push(m);
       m.freezeWorldMatrix();
     }
+  }
+  // the ceiling where the export leaves it open (CEILING_FILLS): its underside in the material and light of the ceiling
+  // it continues
+  for (const f of coll.fills) {
+    const src = statics.find((m) => m.name === f.mesh);
+    const patch = src ? ceilingPatch(scene, f, src) : null;
+    if (patch) { statics.push(patch); patch.freezeWorldMatrix(); }
   }
   // doors: glTF nodes named D_<id>; hinge = node position
   for (const tn of scene.transformNodes.concat(res.meshes as unknown as TransformNode[])) {
@@ -518,6 +527,108 @@ function measureMaxOpen(bvh: TriBVH, d: Door): number {
 }
 
 function safeJson(s: string): Record<string, unknown> { try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; } }
+
+/** Gaps in the exported ceilings (Babylon frame, m; y0/y1 = underside/top of the slab; mesh = the ceiling whose material
+ * and baked light the fill continues). The living-room ceiling of the export ends at the wall line x = 6.19, but in front
+ * of the bathroom door the living room runs on into a 21 cm deep niche up to the door wall (x = 6.40): there the ceiling
+ * was open - from the room one looked up past the wall tops into the 10 cm under the roof - and a mosquito could fly up
+ * into it. Filled here as long as the export leaves the gap (to be closed at the source, hulpmiddelen/chalet). */
+export const CEILING_FILLS = [{ x0: 6.19, z0: -1.30, x1: 6.40, z1: -0.08, y0: 2.313, y1: 2.333, mesh: 'S_A_ceiling' }];
+export type CeilingFill = typeof CEILING_FILLS[number];
+
+/** A downward face of the triangles at height y (within 4 mm) over (x, z): its index, or -1. */
+function faceUnder(d: CollisionData, x: number, z: number, y: number): number {
+  const P = d.pos, I = d.idx;
+  for (let t = 0; t < I.length / 3; t++) {
+    const a = I[3 * t] * 3, b = I[3 * t + 1] * 3, c = I[3 * t + 2] * 3;
+    if (Math.abs(P[a + 1] - y) > 0.004 || Math.abs(P[b + 1] - y) > 0.004 || Math.abs(P[c + 1] - y) > 0.004) continue;
+    if ((P[b + 2] - P[a + 2]) * (P[c] - P[a]) - (P[b] - P[a]) * (P[c + 2] - P[a + 2]) > -1e-9) continue;     // faces down
+    const s1 = (P[b] - P[a]) * (z - P[a + 2]) - (P[b + 2] - P[a + 2]) * (x - P[a]);
+    const s2 = (P[c] - P[b]) * (z - P[b + 2]) - (P[c + 2] - P[b + 2]) * (x - P[b]);
+    const s3 = (P[a] - P[c]) * (z - P[c + 2]) - (P[a + 2] - P[c + 2]) * (x - P[c]);
+    if ((s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0)) return t;
+  }
+  return -1;
+}
+
+/** The collision triangles with the ceiling fills the export still leaves open (no face at the slab's underside over the
+ * middle of the gap) added as closed boxes, wound outward like the rest, with the surface class of the ceiling next to
+ * them. Returns the fills that were added. */
+export function fillCeilings(d: CollisionData, fills: CeilingFill[] = CEILING_FILLS): { data: CollisionData; fills: CeilingFill[] } {
+  const added = fills.filter((f) => faceUnder(d, (f.x0 + f.x1) / 2, (f.z0 + f.z1) / 2, f.y0) < 0);
+  if (!added.length) return { data: d, fills: [] };
+  const nv = d.pos.length / 3, nt = d.idx.length / 3, k = added.length;
+  const pos = new Float32Array((nv + 8 * k) * 3), idx = new Uint32Array((nt + 12 * k) * 3), cls = new Uint8Array(nt + 12 * k), kind = new Uint8Array(nt + 12 * k);
+  pos.set(d.pos); idx.set(d.idx); cls.set(d.cls); kind.set(d.kind);
+  added.forEach((f, i) => {
+    const xm = (f.x0 + f.x1) / 2, zm = (f.z0 + f.z1) / 2;
+    const next = [[f.x0 - 0.05, zm], [f.x1 + 0.05, zm], [xm, f.z0 - 0.05], [xm, f.z1 + 0.05]].map(([x, z]) => faceUnder(d, x, z, f.y0)).find((t) => t >= 0) ?? -1;
+    const v0 = nv + 8 * i, t0 = nt + 12 * i;
+    [[f.x0, f.y0, f.z0], [f.x1, f.y0, f.z0], [f.x1, f.y1, f.z0], [f.x0, f.y1, f.z0], [f.x0, f.y0, f.z1], [f.x1, f.y0, f.z1], [f.x1, f.y1, f.z1], [f.x0, f.y1, f.z1]]
+      .forEach((p, j) => pos.set(p, (v0 + j) * 3));
+    [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [3, 7, 6, 2], [0, 4, 7, 3], [1, 2, 6, 5]].forEach((q, j) => {
+      idx.set([v0 + q[0], v0 + q[1], v0 + q[2], v0 + q[0], v0 + q[2], v0 + q[3]], (t0 + 2 * j) * 3);
+    });
+    cls.fill(next >= 0 ? d.cls[next] : 3, t0, t0 + 12); kind.fill(next >= 0 ? d.kind[next] : 0, t0, t0 + 12);
+  });
+  return { data: { pos, idx, cls, kind }, fills: added };
+}
+
+/** The underside of a ceiling fill as a mesh in the material of the ceiling it continues (src, its neighbour on one side):
+ * the albedo UVs run on from that ceiling, the baked light is that ceiling's mirrored at its edge (1.2 cm inside it, clear
+ * of the island's border texels) - the edge's light held across the fill showed as streaks. */
+function ceilingPatch(scene: Scene, f: CeilingFill, src: AbstractMesh): Mesh | null {
+  const pos = src.getVerticesData(VertexBuffer.PositionKind), uv = src.getVerticesData(VertexBuffer.UVKind);
+  const uv2 = src.getVerticesData(VertexBuffer.UV2Kind), ind = src.getIndices();
+  if (!pos || !uv || !uv2 || !ind) return null;
+  const wm = src.computeWorldMatrix(true), w: Vector3[] = [];
+  for (let i = 0; i < pos.length / 3; i++) w.push(Vector3.TransformCoordinates(new Vector3(pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]), wm));
+  // the source's underside at (x, z): albedo and lightmap UVs, and the winding of its face
+  const at = (x: number, z: number) => {
+    for (let t = 0; t < ind.length; t += 3) {
+      const a = ind[t], b = ind[t + 1], c = ind[t + 2], A = w[a], B = w[b], C = w[c];
+      if (Math.abs(A.y - f.y0) > 0.004 || Math.abs(B.y - f.y0) > 0.004 || Math.abs(C.y - f.y0) > 0.004) continue;
+      const det = (B.x - A.x) * (C.z - A.z) - (C.x - A.x) * (B.z - A.z);
+      if (Math.abs(det) < 1e-9) continue;
+      const l1 = ((x - A.x) * (C.z - A.z) - (C.x - A.x) * (z - A.z)) / det, l2 = ((B.x - A.x) * (z - A.z) - (x - A.x) * (B.z - A.z)) / det;
+      if (l1 < -1e-6 || l2 < -1e-6 || l1 + l2 > 1 + 1e-6) continue;
+      const l0 = 1 - l1 - l2, mix = (q: ArrayLike<number>, k: number) => q[2 * a + k] * l0 + q[2 * b + k] * l1 + q[2 * c + k] * l2;
+      return { uv: [mix(uv, 0), mix(uv, 1)], uv2: [mix(uv2, 0), mix(uv2, 1)], det };
+    }
+    return null;
+  };
+  // the side the source lies on (unit step from the fill into it), and a point of the source for a corner of the fill
+  const xm = (f.x0 + f.x1) / 2, zm = (f.z0 + f.z1) / 2;
+  const side = ([[-1, 0, f.x0 - 0.05, zm], [1, 0, f.x1 + 0.05, zm], [0, -1, xm, f.z0 - 0.05], [0, 1, xm, f.z1 + 0.05]] as const).find(([, , x, z]) => at(x, z));
+  if (!side) return null;
+  const [sx, sz] = side;
+  const onSource = (x: number, z: number, inset: number): [number, number] => sx ? [sx < 0 ? f.x0 - inset : f.x1 + inset, Math.min(f.z1 - 0.001, Math.max(f.z0 + 0.001, z))]
+    : [Math.min(f.x1 - 0.001, Math.max(f.x0 + 0.001, x)), sz < 0 ? f.z0 - inset : f.z1 + inset];
+  // (half a mm above the source's underside and 1 cm on under it, 5 mm into the walls around: meeting it edge to edge
+  // left a crack of single pixels along the seam, through which the dark space above showed)
+  const g = (s: number) => (s ? 0.01 : 0.005);
+  const [ex0, ex1, ez0, ez1] = [f.x0 - g(+(sx < 0)), f.x1 + g(+(sx > 0)), f.z0 - g(+(sz < 0)), f.z1 + g(+(sz > 0))];
+  const corners: [number, number][] = [[ex0, ez0], [ex1, ez0], [ex1, ez1], [ex0, ez1]];
+  const positions: number[] = [], normals: number[] = [], uvs: number[] = [], uvs2: number[] = [];
+  let det = 0;
+  for (const [x, z] of corners) {
+    const e = onSource(x, z, 0.012), i = onSource(x, z, 0.112), E = at(e[0], e[1]), I = at(i[0], i[1]);
+    const d = Math.hypot(x - e[0], z - e[1]);               // from the source's edge onward, the albedo as it runs there
+    const M = at(e[0] + sx * d, e[1] + sz * d);             // (the source's light as far inside it as the corner is out)
+    if (!E || !I || !M) return null;
+    positions.push(x, f.y0 + 0.0005, z); normals.push(0, -1, 0);
+    uvs.push(E.uv[0] + (E.uv[0] - I.uv[0]) * d / 0.1, E.uv[1] + (E.uv[1] - I.uv[1]) * d / 0.1);
+    uvs2.push(M.uv2[0], M.uv2[1]);
+    det = E.det;
+  }
+  // wound like the source's underside (corners counter-clockwise in x-z)
+  const vd = new VertexData();
+  vd.positions = positions; vd.normals = normals; vd.uvs = uvs; vd.uvs2 = uvs2; vd.indices = det > 0 ? [0, 1, 2, 0, 2, 3] : [0, 2, 1, 0, 3, 2];
+  const m = new Mesh(f.mesh + '_vulling', scene);
+  vd.applyToMesh(m);
+  m.material = src.material; m.isPickable = false; m.receiveShadows = false;
+  return m;
+}
 
 // Door kinematics (Babylon frame). dir = unit vector hinge->latch when closed (x,z); sign = rotation sign that opens toward
 // the swing side recorded in R08 (all interior doors open into the living room; en-suite into bathroom; French door out).
