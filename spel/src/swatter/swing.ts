@@ -150,6 +150,8 @@ export interface Swing {
 
 const hit: RayHit = { t: 0, tri: 0, nx: 0, ny: 0, nz: 0 };
 const gn = [0, 0, 0];
+/** chain() points 0-6: shoulder, grip, hand sides, handle, wrist, forearm (the wire and head follow) */
+const HAND_PTS = 7;
 
 export class SwingSystem {
   swing: Swing | null = null;
@@ -390,7 +392,9 @@ export class SwingSystem {
           }
         }
         // chain points further on, behind the face where it covers them and hidden from the shoulder by the object
-        for (let j = i; j < pts.length; j++) {
+        // (past the arm line only the hand's own points: the swatter reaching around a fixture the line grazes is not
+        // behind it - that read 11 cm deep for one breath in three)
+        for (let j = i; j < (i === 1 ? HAND_PTS : pts.length); j++) {
           if (!below(i, j)) continue;
           const q = pts[j], dd = dot(sub(hp, q), n);
           if (dd <= depth) continue;
@@ -483,9 +487,9 @@ export class SwingSystem {
     // pushed out past a door jamb (the arm reached through the doorway) and the arm's own pose is free again, but the
     // way back runs through the wall: after 0.25 s at rest it comes back through it (as fast as the limit below allows)
     // - holding on kept it up to 50 cm from the hand for seconds while turning in a doorway
-    // (whether the arm's own pose is free is measured again only once it has moved 5 mm)
+    // (whether the arm's own pose is free: while it is not, measured again only once it has moved 5 mm)
     if (resting && off === this.corr && cl > 0.1) {
-      if (!this.stuckAt || len(sub(p.h, this.stuckAt)) > 0.005) { this.restFree = this.penetration(p, S, v(), hand).depth <= tol; this.stuckAt = p.h; }
+      if (this.stuck > 0 || !this.stuckAt || len(sub(p.h, this.stuckAt)) > 0.005) { this.restFree = this.penetration(p, S, v(), hand).depth <= tol; this.stuckAt = p.h; }
       this.stuck = this.restFree ? this.stuck + 1 : 0;
     } else this.stuck = 0;
     if (this.stuck >= 15) { off = v(); this.holdFrames = 0; }
