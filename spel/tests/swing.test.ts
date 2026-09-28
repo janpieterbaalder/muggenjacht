@@ -293,3 +293,110 @@ test('flying mosquitoes stay in reach at 1.0-1.15 m (the wire may bend in a fast
   assert.ok(hits(1.0) >= 130, `1.0 m: ${hits(1.0)} of 250`);
   assert.ok(hits(1.15) >= 60, `1.15 m: ${hits(1.15)} of 250`);
 });
+// ---- the swatter lands where it strikes (user feedback 28-09-2026: at the toilet's back wall the mosquito died, but the
+// swatter came down beside it - the arm was in the way; one should turn the arm and swatter before striking)
+
+/** A swat as Session makes it: aimed through the eye at `at` (a point on a surface), the body leaning in or stepping
+ * back as the plan asks (eased in as Session does), the shown swatter resolved against the room every frame. A mosquito
+ * rests on the surface there. Returns the contact, the plan, the shown head at contact and the swing's stop pose. */
+function strike(bvh: ReturnType<typeof boxesToBVH>, eye: { x: number; y: number; z: number }, at: { x: number; y: number; z: number }, nrm: { x: number; y: number; z: number },
+  hand: number, room = { leanMax: 0.32, leanBack: 0 }) {
+  const d0 = { x: at.x - eye.x, y: at.y - eye.y, z: at.z - eye.z }, l = Math.hypot(d0.x, d0.y, d0.z);
+  const yaw = Math.atan2(-d0.z, d0.x), pitch = Math.atan2(d0.y, Math.hypot(d0.x, d0.z));
+  const frame = (lean: number): CamFrame => {
+    const c = view(yaw * 180 / Math.PI, pitch * 180 / Math.PI);
+    const fx = Math.cos(yaw), fz = -Math.sin(yaw);
+    return { ...c, eye: { x: eye.x + fx * lean, y: eye.y - 0.35 * Math.max(0, lean), z: eye.z + fz * lean } };
+  };
+  const m = { x: at.x + nrm.x * 0.003, y: at.y + nrm.y * 0.003, z: at.z + nrm.z * 0.003 };
+  const mosq: MosquitoTarget[] = [{ idx: 0, pos: m, prev: m, alive: true, resting: true, nrm }];
+  const sys = new SwingSystem(bvh, noDoors);
+  for (let i = 0; i < 30; i++) sys.update(1 / 60, sys.restFor(frame(0), hand, i / 60), [], frame(0), hand);
+  assert.ok(sys.begin(frame(0), { x: d0.x / l, y: d0.y / l, z: d0.z / l }, hand, 0.5, mosq, room.leanMax, room.leanBack), 'swing starts');
+  const plan = { lean: sys.swing!.lean, target: sys.swing!.target };
+  let lean = 0, c: ContactInfo | null = null, shown = sys.pose, stop = sys.pose;
+  for (let i = 0; i < 60 && !c; i++) {
+    const inSwing = !!sys.swing && (sys.swing.phase === 'windup' || sys.swing.phase === 'strike');
+    const goal = inSwing ? plan.lean : 0;
+    lean += (goal - lean) * (1 - Math.exp(-(1 / 60) / (Math.abs(goal) > Math.abs(lean) ? 0.06 : 0.22)));
+    const cf = frame(lean);
+    c = sys.update(1 / 60, sys.restFor(cf, hand, 0.5 + i / 60), mosq, cf, hand);
+    if (c) { shown = sys.pose; stop = sys.swing!.target; }
+  }
+  // offset of the shown head from the mosquito along the surface, and how far the stop pose is off the surface
+  const off = (p: { h: { x: number; y: number; z: number } }) => {
+    const r = { x: p.h.x - m.x, y: p.h.y - m.y, z: p.h.z - m.z }, dn = r.x * nrm.x + r.y * nrm.y + r.z * nrm.z;
+    return Math.hypot(r.x - nrm.x * dn, r.y - nrm.y * dn, r.z - nrm.z * dn);
+  };
+  const gap = (stop.h.x - at.x) * nrm.x + (stop.h.y - at.y) * nrm.y + (stop.h.z - at.z) * nrm.z;
+  return { c, plan, shown, stop, sideways: off(shown), gap, sys };
+}
+
+function chalet() {
+  const buf = readFileSync(join(process.cwd(), 'public', 'assets', 'chalet_coll.bin'));
+  return parseCollision(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+}
+
+test('toilet back wall (chalet): the swatter is turned to fit and lands on the mosquito it kills', () => {
+  // standing in the toilet (0.72 m wide) facing the back wall 0.87 m ahead. With the most comfortable pose the handle lay
+  // level toward the right hand and the grip ended 4 cm inside the side wall: pushed out as a whole, the head came down
+  // 49 mm beside the killed mosquito (right hand, middle of the wall at 1.2 m)
+  const bvh = chalet(), eye = { x: 2.79, y: 1.62, z: -0.95 }, wall = { x: 0, y: 0, z: -1 };
+  for (const [x, y, hand] of [[2.79, 1.2, 1], [2.79, 1.2, -1], [2.62, 1.2, 1], [2.95, 1.2, -1], [2.79, 0.95, 1], [2.95, 1.5, 1]]) {
+    const r = strike(bvh, eye, { x, y, z: -0.08 }, wall, hand);
+    assert.ok(r.c && r.c.mosquito === 0, `(${x}, ${y}) hand ${hand}: the mosquito is hit`);
+    assert.ok(r.sideways < 0.012, `(${x}, ${y}) hand ${hand}: the head lands ${(r.sideways * 1000).toFixed(0)} mm beside it`);
+    assert.ok(r.gap < 0.006, `(${x}, ${y}) hand ${hand}: the head stops ${(r.gap * 1000).toFixed(0)} mm short of the wall`);
+  }
+});
+
+test('in a narrow passage the swatter is turned so that hand and handle stay clear of the side walls', () => {
+  // a 0.72 m wide passage like the toilet, a wall 0.87 m ahead: at contact nothing of the swatter, hand or arm line is
+  // inside a wall, so the shown swatter is not pushed off the target
+  const floor = { min: [-3.1, -0.1, -3.1], max: [9.1, 0, 9.1], kind: 1, cls: 1 } as const;
+  const bvh = boxesToBVH([{ ...floor, min: [...floor.min], max: [...floor.max] }, { min: [2.87, 0, 0], max: [2.97, 2.4, 4] },
+    { min: [0, 0, 1.54], max: [3, 2.4, 1.64] }, { min: [0, 0, 2.36], max: [3, 2.4, 2.46] }]);
+  const { fwd, right } = bodyFrame(cam.f, cam.r);
+  for (const [z, y, hand] of [[2.0, 1.2, 1], [2.0, 1.2, -1], [1.85, 1.5, 1], [2.15, 1.5, -1], [2.0, 0.95, 1]]) {
+    const r = strike(bvh, { x: 2, y: 1.62, z: 2 }, { x: 2.87, y, z }, { x: -1, y: 0, z: 0 }, hand);
+    assert.ok(r.c && r.c.mosquito === 0, `(${z}, ${y}) hand ${hand}: hit`);
+    const S = shoulderAt({ x: 2 + r.plan.lean, y: 1.62 - 0.35 * Math.max(0, r.plan.lean), z: 2 }, fwd, right, hand);
+    const inWall = r.sys.penetration(r.stop, S, undefined, hand).depth;
+    assert.ok(inWall <= 0.003, `(${z}, ${y}) hand ${hand}: at contact ${(inWall * 1000).toFixed(0)} mm inside a wall`);
+    assert.ok(r.sideways < 0.012, `(${z}, ${y}) hand ${hand}: the head lands ${(r.sideways * 1000).toFixed(0)} mm beside the mosquito`);
+  }
+});
+
+test('a short strike lands flat on the aimed point, not on its curve and tilted', () => {
+  // the strike's curve (2.5 cm) and the turn of the face ran on to the aimed point 12 mm beyond the wall: a strike of
+  // 12 cm landed ~1 cm high with its face tilted; and the aim 12 mm on along an oblique view put the head up to 2 cm aside
+  const bvh = boxesToBVH([{ min: [2.45, 0, 0], max: [2.55, 2.4, 4] }]);
+  for (const [y, z] of [[1.62, 2.0], [1.9, 2.25], [1.3, 1.8]]) {
+    const r = strike(bvh, { x: 2, y: 1.62, z: 2 }, { x: 2.45, y, z }, { x: -1, y: 0, z: 0 }, 1, { leanMax: 0, leanBack: 0 });
+    assert.ok(r.c && r.c.mosquito === 0, `(${y}, ${z}): hit`);
+    assert.ok(r.sideways < 0.006, `(${y}, ${z}): the head lands ${(r.sideways * 1000).toFixed(1)} mm beside the aimed point`);
+    assert.ok(r.stop.n.x > Math.cos(2 * Math.PI / 180), `(${y}, ${z}): face tilted ${(Math.acos(r.stop.n.x) * 180 / Math.PI).toFixed(1)} deg against the wall`);
+  }
+});
+
+test('a resting mosquito is squashed against its wall: the head goes on to the wall', () => {
+  // the hit is registered 11 mm before the face reaches the mosquito (legs and a fair margin); the swing stopped there,
+  // the head 1.4 cm short of the wall
+  const bvh = boxesToBVH([{ min: [2.6, 0, 0], max: [2.7, 2.4, 4] }]);
+  const r = strike(bvh, { x: 2, y: 1.62, z: 2 }, { x: 2.6, y: 1.5, z: 2.02 }, { x: -1, y: 0, z: 0 }, 1);
+  assert.ok(r.c && r.c.mosquito === 0 && !r.c.air, 'squashed');
+  assert.ok(r.gap < 0.006, `the head stops ${(r.gap * 1000).toFixed(1)} mm in front of the wall`);
+});
+
+test('a mosquito right in front of the face: the body steps back, the head lands on it, the hand stays out of the wall', () => {
+  // 0.37 m in front of the eye the 46 cm swatter only fitted with the handle bent into the wall: the hand was pushed out
+  // and the head held 5 cm in front of the mosquito it killed
+  const floor = { min: [-3.1, -0.1, -3.1], max: [9.1, 0, 9.1], kind: 1, cls: 1 } as const;
+  const bvh = boxesToBVH([{ ...floor, min: [...floor.min], max: [...floor.max] }, { min: [2.37, 0, 0], max: [2.47, 2.4, 4] }]);
+  for (const hand of [1, -1]) {
+    const r = strike(bvh, { x: 2, y: 1.62, z: 2 }, { x: 2.37, y: 1.65, z: 2.0 }, { x: -1, y: 0, z: 0 }, hand, { leanMax: 0.07, leanBack: 0.25 });
+    assert.ok(r.plan.lean < -0.05, `hand ${hand}: steps back (${r.plan.lean.toFixed(2)} m)`);
+    assert.ok(r.c && r.c.mosquito === 0, `hand ${hand}: hit`);
+    assert.ok(r.sideways < 0.012 && r.gap < 0.006, `hand ${hand}: the head lands ${(r.sideways * 1000).toFixed(0)} mm beside it, ${(r.gap * 1000).toFixed(0)} mm in front of the wall`);
+  }
+});

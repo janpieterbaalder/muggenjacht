@@ -72,11 +72,40 @@ export function crouchFor(eyeY: number, y: number) { return Math.max(0, Math.min
 
 export interface StrikePlan { pose: Pose; lean: number; crouch: number; cost: number; }
 
+/** Eye of the body leaned toward the view (m; negative = stepped back) and with bent knees (m; negative = on the toes),
+ * as Session moves it. */
+export function leanedEye(c: CamFrame, lean: number, crouch: number): V3 {
+  const { fwd } = bodyFrame(c.f, c.r);
+  return v(c.eye.x + fwd.x * lean, c.eye.y - 0.35 * Math.max(0, lean) - crouch, c.eye.z + fwd.z * lean);
+}
+
+/** How many whole-body poses planStrike offers to the fit test at most, per strain level (the most comfortable first,
+ * each clearly different from the ones rejected before). */
+export const FIT_TRIES = 12;
+/** A planned swing fits (m): swatter, hand and arm line at most this deep in the room at contact and in the approach
+ * pose, and the planned path first touches the world with the head this close to its contact position. */
+export const FIT = { contact: 0.002, approach: 0.005, reach: 0.02 };
+/** Strain levels of the arm for planStrike, the comfortable one first (WRIST keeps a margin to the adult range of motion,
+ * the elbow a little bent, the wire bent up to 40 deg below the head): then wrist and forearm up to the adult range
+ * (deg), the arm straight, the wire bent up to 60 deg; last the wrist forced past it for the moment of the slap - the
+ * head then still lands where it was aimed, instead of being pushed off it by a hand in the wall (chalet scan: 9 % of the
+ * hits, in corners and narrow spots). */
+const STRAIN = [null, { ext: 70, dev: 35, roll: 85 }, { ext: 90, dev: 55, roll: 120 }];
+
 /** Choose the swatter orientation for a head at P with face normal n from the ARM: the wrist must stay within reach of
  * the (leaned) shoulder and the hand within the wrist and forearm range. Searches the rotation of the swatter about
  * its face normal, the neck flex, the upper-body lean and (for high targets) rising onto the toes; the most comfortable
- * whole-body pose wins. null = not reachable. */
-export function planStrike(c: CamFrame, P: V3, n: V3, hand: number, leanMax: number, coarse = false): StrikePlan | null {
+ * whole-body pose wins. null = not reachable.
+ * opts.leanBack: how far (m) the body may step back (a target too close in front for the swatter's length).
+ * opts.face: a point on the surface the head slaps: a hand on or behind that plane comes last (the handle bent into the
+ * wall it strikes; it can pass the edge of a small surface, a table top, so it is not ruled out).
+ * opts.misfit: how badly a pose collides with the room (0 = it fits). The poses are then offered from the most
+ * comfortable on and the first that fits wins - the swatter is turned before the strike, as one does next to a wall or in
+ * a corner, instead of the most comfortable pose ending with the hand in the wall. If no comfortable pose fits, the
+ * arm is strained further (STRAIN); if nothing fits at all, the least bad pose. */
+export function planStrike(c: CamFrame, P: V3, n: V3, hand: number, leanMax: number, coarse = false,
+  opts: { misfit?: (plan: StrikePlan) => number; face?: V3; leanBack?: number } = {}): StrikePlan | null {
+  const { misfit, face, leanBack = 0 } = opts;
   const nPh = coarse ? 16 : 32, fdStep = coarse ? 20 : 10, leanStep = coarse ? 0.16 : 0.064;
   const { fwd, right } = bodyFrame(c.f, c.r);
   const base = crouchFor(c.eye.y, P.y);
@@ -90,46 +119,95 @@ export function planStrike(c: CamFrame, P: V3, n: V3, hand: number, leanMax: num
   const high = P.y > c.eye.y + 0.1;
   // reaching up to the ceiling one stretches the arm fully and turns the forearm to its limit (adult ROM ~85 deg)
   const overhead = P.y > c.eye.y + 0.3;
-  const armMax = overhead ? BODY.upper + BODY.fore : ARM_PLAN_MAX, rollMax = overhead ? 85 : WRIST.roll;
-  let best: StrikePlan | null = null;
-  for (let lean = 0; lean <= leanMax + 1e-6; lean += leanStep) for (const crouch of crouches) {
-    const eye = v(c.eye.x + fwd.x * lean, c.eye.y - 0.35 * lean - crouch, c.eye.z + fwd.z * lean);
-    const S0 = shoulderAt(eye, fwd, right, hand);
-    const dHead = len(sub(P, S0));
-    // moving the body costs a little: lean or rise only when it makes the arm clearly more comfortable
-    const bodyCost = 0.8 * (lean / 0.32) ** 2 + (crouch < 0 ? 0.6 * (-crouch / TIPTOE) ** 2 : 0);
-    if (best && bodyCost >= best.cost) continue;
-    for (let i = 0; i < nPh; i++) {
-      const ph = i / nPh * Math.PI * 2;
-      const u = add(v(e1.x * Math.cos(ph), e1.y * Math.cos(ph), e1.z * Math.cos(ph)), e2, Math.sin(ph));
-      // the wire handle bends (it gives in the fast strike, and the head slaps flat on a surface), furthest against the
-      // ceiling above you
-      for (let fd = -10; fd <= (high ? 60 : 40); fd += fdStep) {
-        const pose = finishPose(P, n, u, fd * Math.PI / 180);
-        const { wrist, fdir, palm } = handOnHandle(pose.grip, pose.r, pose.hu, pose.hn, hand);
-        // reaching up lifts the shoulder with the shoulder blade
-        const S = v(S0.x, S0.y + shoulderLift(S0, wrist), S0.z);
-        const L = len(sub(wrist, S));
-        if (L > armMax) continue;
-        const j = solveArm(wrist, fdir, S, pole);
-        const w = wristAngles(fdir, palm, wrist, j.elbow, j.shoulder, hand);
-        if (Math.abs(w.ext) > WRIST.ext || Math.abs(w.dev) > WRIST.dev || Math.abs(w.roll) > rollMax) continue;
-        // prefer a relaxed wrist, little neck flex, the handle reaching back toward the body (grip nearer the
-        // shoulder than the head), the elbow not behind the shoulder, a bent elbow (not a locked, straight arm),
-        // the elbow below the shoulder (no 'chicken wing', except reaching up) and the hand in front of the body
-        // rather than far out to the side
-        let cost = bodyCost + (w.ext / WRIST.ext) ** 2 + (w.dev / WRIST.dev) ** 2 + 0.5 * (w.roll / WRIST.roll) ** 2 + 0.4 * (fd / 45) ** 2;
-        cost += 4 * Math.max(0, len(sub(pose.grip, S)) - dHead + 0.15);
-        cost += 12 * Math.max(0, -dot(sub(j.elbow, S), fwd) - 0.02);
-        cost += 6 * Math.max(0, 0.12 - dot(sub(wrist, S), fwd));
-        cost += 1.5 * (Math.max(0, L - 0.42) / 0.13) ** 2;
-        if (!high) cost += 8 * Math.max(0, j.elbow.y - (S.y - 0.08));
-        cost += 4 * Math.max(0, dot(sub(wrist, S), right) * hand - 0.18);
-        if (!best || cost < best.cost) best = { pose, lean, crouch, cost };
+  const limits = (level: number) => level === 0
+    ? { armMax: overhead ? BODY.upper + BODY.fore : ARM_PLAN_MAX, fdMax: high ? 60 : 40, ...WRIST, roll: overhead ? 85 : WRIST.roll }
+    : { armMax: BODY.upper + BODY.fore, fdMax: 60, ...STRAIN[level]! };
+  const levels = STRAIN.map((_, k) => limits(k));
+  const levelOf = (L: number, fd: number, w: { ext: number; dev: number; roll: number }, upTo: number) => levels.findIndex((lim, k) => k <= upTo &&
+    L <= lim.armMax && fd <= lim.fdMax && Math.abs(w.ext) <= lim.ext && Math.abs(w.dev) <= lim.dev && Math.abs(w.roll) <= lim.roll);
+  /** The most comfortable pose (all: for every turn and bend of the swatter up to the given strain level the most
+   * comfortable pose, at each level it can be held with - how the body leans changes little else). */
+  const search = (upTo: number, all: Map<number, StrikePlan & { level: number }> | null) => {
+    let best: StrikePlan | null = null;
+    const loosest = levels[upTo];
+    for (let li = -Math.floor(leanBack / leanStep + 1e-6); li * leanStep <= leanMax + 1e-6; li++) for (const crouch of crouches) {
+      const lean = li * leanStep;
+      const eye = leanedEye(c, lean, crouch);
+      const S0 = shoulderAt(eye, fwd, right, hand);
+      const dHead = len(sub(P, S0));
+      // moving the body costs a little: lean, step back or rise only when it makes the arm clearly more comfortable
+      const bodyCost = 0.8 * (lean / 0.32) ** 2 + (crouch < 0 ? 0.6 * (-crouch / TIPTOE) ** 2 : 0);
+      if (!all && best && bodyCost >= best.cost) continue;
+      for (let i = 0; i < nPh; i++) {
+        const ph = i / nPh * Math.PI * 2;
+        const u = add(v(e1.x * Math.cos(ph), e1.y * Math.cos(ph), e1.z * Math.cos(ph)), e2, Math.sin(ph));
+        // the wire handle bends (it gives in the fast strike, and the head slaps flat on a surface), furthest against
+        // the ceiling above you
+        for (let fd = -10; fd <= loosest.fdMax; fd += fdStep) {
+          const pose = finishPose(P, n, u, fd * Math.PI / 180);
+          const { wrist, fdir, palm } = handOnHandle(pose.grip, pose.r, pose.hu, pose.hn, hand);
+          // reaching up lifts the shoulder with the shoulder blade
+          const S = v(S0.x, S0.y + shoulderLift(S0, wrist), S0.z);
+          const L = len(sub(wrist, S));
+          if (L > loosest.armMax) continue;
+          const j = solveArm(wrist, fdir, S, pole);
+          const w = wristAngles(fdir, palm, wrist, j.elbow, j.shoulder, hand);
+          const level = levelOf(L, fd, w, upTo);
+          if (level < 0) continue;
+          // prefer a relaxed wrist, little neck flex, the handle reaching back toward the body (grip nearer the
+          // shoulder than the head), the elbow not behind the shoulder, a bent elbow (not a locked, straight arm),
+          // the elbow below the shoulder (no 'chicken wing', except reaching up) and the hand in front of the body
+          // rather than far out to the side
+          let cost = bodyCost + (w.ext / WRIST.ext) ** 2 + (w.dev / WRIST.dev) ** 2 + 0.5 * (w.roll / WRIST.roll) ** 2 + 0.4 * (fd / 45) ** 2;
+          cost += 4 * Math.max(0, len(sub(pose.grip, S)) - dHead + 0.15);
+          cost += 12 * Math.max(0, -dot(sub(j.elbow, S), fwd) - 0.02);
+          cost += 6 * Math.max(0, 0.12 - dot(sub(wrist, S), fwd));
+          cost += 1.5 * (Math.max(0, L - 0.42) / 0.13) ** 2;
+          if (!high) cost += 8 * Math.max(0, j.elbow.y - (S.y - 0.08));
+          cost += 4 * Math.max(0, dot(sub(wrist, S), right) * hand - 0.18);
+          if (face) {
+            const behind = (q: V3) => dot(sub(q, face), n) > -0.002;
+            if (behind(pose.grip) || behind(add(pose.grip, pose.hn, 0.035)) || behind(add(pose.grip, pose.hu, 0.05)) || behind(wrist)) cost += 3;
+          }
+          if (all) {
+            const key = (i * 16 + Math.round((fd + 10) / fdStep)) * 4 + level, had = all.get(key);
+            if (!had || cost < had.cost) all.set(key, { pose, lean, crouch, cost, level });
+          }
+          if (level === 0 && (!best || cost < best.cost)) best = { pose, lean, crouch, cost };
+        }
       }
     }
+    return best;
+  };
+  // the most comfortable pose, found as fast as without a fit test; mostly it fits
+  // (a target no comfortable pose reaches stays out of reach: straining the arm is only for fitting it in)
+  const first = search(0, null);
+  if (!misfit || !first) return first;
+  const firstMiss = misfit(first);
+  if (firstMiss <= 0) return first;
+  // else every pose up to the forced wrist, the least strained and most comfortable first
+  const kept = new Map<number, StrikePlan & { level: number }>();
+  search(STRAIN.length - 1, kept);
+  const all = [...kept.values()].sort((a, b) => a.level - b.level || a.cost - b.cost);
+  // (a pose next to one that did not fit - the handle turned 12 deg or bent 10 deg further - will not fit either, with
+  // another lean just as little: swatter and hand are where they were. Skipped, so the tries spread over really
+  // different ways of holding the swatter)
+  const tried: StrikePlan[] = [first];
+  let least: StrikePlan = first, leastMiss = firstMiss, level = -1, tries = 0;
+  // (a pose rejected at a glance - misfit Infinity - is not counted as a try, up to a limit)
+  let glances = 0;
+  for (const p of all) {
+    if (p.level !== level) { level = p.level; tries = level === 0 ? 1 : 0; }
+    if (tries >= FIT_TRIES || glances >= 8 * FIT_TRIES) continue;
+    if (tried.some((q) => dot(q.pose.u, p.pose.u) > 0.978 && Math.abs(q.pose.flex - p.pose.flex) < 0.18)) continue;
+    tried.push(p);
+    const miss = misfit(p);
+    if (miss === Infinity) { glances++; continue; }
+    tries++;
+    if (miss <= 0) return { pose: p.pose, lean: p.lean, crouch: p.crouch, cost: p.cost };
+    if (miss < leastMiss) { leastMiss = miss; least = p; }
   }
-  return best;
+  return { pose: least.pose, lean: least.lean, crouch: least.crouch, cost: least.cost };
 }
 
 export type SwingPhase = 'idle' | 'windup' | 'strike' | 'rebound' | 'follow' | 'return';
@@ -145,6 +223,8 @@ export interface Swing {
   tApproach: number;
   /** body movement the swing needs: upper-body lean toward the target (m) and knee bend (m) */
   lean: number; crouch: number;
+  /** share of the strike's way at which the head reaches the surface (it is aimed 12 mm beyond it; 1 in the air) */
+  flush: number;
   contact: ContactInfo | null; plannedNormal: V3; hitMosquito: number;
 }
 
@@ -170,13 +250,15 @@ export class SwingSystem {
   }
 
   /** Plan a swing toward the aim direction d (unit, world) from the eye. leanMax = how far (m) the upper body can lean
-   * toward the target (free space in front of the chest). The swing first brings the swatter to about 40 cm in front
-   * of the target while the body leans in / bends the knees (approach), then strikes (D48). A target the arm cannot
-   * reach even when leaning ends as an air swing where the arm runs out: step closer. */
-  begin(c: CamFrame, d: V3, hand: number, t: number, mosq: MosquitoTarget[], leanMax = 0): boolean {
+   * toward the target (free space in front of the chest), leanBack = how far the body can step back (free space behind
+   * it). The swing first brings the swatter to about 40 cm in front of the target while the body leans in / bends the
+   * knees (approach), then strikes (D48). A target the arm cannot reach even when leaning ends as an air swing where
+   * the arm runs out: step closer. */
+  begin(c: CamFrame, d: V3, hand: number, t: number, mosq: MosquitoTarget[], leanMax = 0, leanBack = 0): boolean {
     if (this.swing && this.swing.phase !== 'return' && this.swing.phase !== 'follow') return false;
     if (this.cooldown > 0) return false;
     const start = this.pose ?? restPose(c, hand, t, v());
+    this.startsBlocked = false;
     // world target along the aim ray
     let dist = REACH.max, surface = false, nrm = norm(v(-d.x, -d.y, -d.z));
     if (this.bvh.raycast(c.eye.x, c.eye.y, c.eye.z, d.x, d.y, d.z, REACH.max + 0.08, hit, 15)) {
@@ -194,12 +276,17 @@ export class SwingSystem {
       if (off < 0.05) { dist = along; surface = false; aimM = m.idx; }
     }
     dist = Math.max(REACH.min, Math.min(dist, REACH.max));
-    // aim 12 mm beyond a surface: the continuous sweep then always registers the contact AT the surface
-    // (planning to stop just short of it made contact depend on a floating-point tie)
-    let P = add(c.eye, d, surface ? dist + 0.012 : dist);
     // contact orientation: face flush with surface, or face-on to the swing direction in air
     let n = surface ? norm(v(-nrm.x, -nrm.y, -nrm.z)) : d;
-    let plan = planStrike(c, P, n, hand, leanMax);
+    // aim 12 mm beyond a surface: the continuous sweep then always registers the contact AT the surface
+    // (planning to stop just short of it made contact depend on a floating-point tie). Beyond it along its normal, the
+    // way the head comes in: 12 mm on along an oblique aim put the head's centre up to 2.3 cm beside the aimed point.
+    let P = surface ? add(add(c.eye, d, dist), n, 0.012) : add(c.eye, d, dist);
+    // the swatter is held so that it fits where it goes: hand, handle and head clear of walls and furniture at the target
+    // and on the way there (a pose with the hand in a side wall was pushed out as a whole: the head landed up to 7 cm
+    // beside the mosquito it killed, at the back wall of the toilet)
+    const fit = { misfit: (pl: StrikePlan) => this.misfit(this.shape(c, d, start, P, n, surface, pl), c, hand), face: surface ? add(c.eye, d, dist) : undefined, leanBack };
+    let plan = planStrike(c, P, n, hand, leanMax, false, fit);
     // out of reach: the swing ends in the air where the arm (with the lean) runs out - binary search on the distance
     // with a coarse plan, then one full plan there
     if (!plan) {
@@ -209,30 +296,94 @@ export class SwingSystem {
         for (let k = 0; k < 6; k++) { const mid = (lo + hi) / 2; if (planStrike(c, add(c.eye, d, mid), n, hand, leanMax, true)) lo = mid; else hi = mid; }
         for (let back = 0; !plan && lo - back >= REACH.min; back += 0.03) {
           P = add(c.eye, d, lo - back);
-          plan = planStrike(c, P, n, hand, leanMax);
+          plan = planStrike(c, P, n, hand, leanMax, false, { misfit: fit.misfit, leanBack });
           if (plan) dist = lo - back;
         }
       }
     }
     if (!plan) return false;
-    const target = plan.pose;
-    // approach: the swatter comes to ~40 cm in front of the target (outside a resting mosquito's alarm distance),
-    // head tilted back a little (cocked wrist); less room for near targets
-    const eyeL = len(sub(P, c.eye)) - plan.lean;
-    const D = Math.max(0.12, Math.min(0.40, eyeL - 0.38));
-    const preN = norm(add(n, v(0, 1, 0), 0.25));
-    // straight in the approach; the wire bends into the planned flex only in the strike itself
-    const pre = finishPose(add(P, n, -D), preN, target.u, 0);
-    // recovery target after contact
-    const after = surface ? finishPose(add(P, n, -0.05), n, target.u, target.flex) : finishPose(add(P, d, 0.12), norm(add(d, c.up, -0.4)), target.u, target.flex);
-    const ta = Math.max(0.10, Math.min(0.30, 0.08 + 0.45 * len(sub(pre.h, start.h)) + 0.25 * plan.lean));
-    const ts = 0.05 + 0.08 * D / 0.40;                    // ~0.13 s over 40 cm: ~3 m/s mean, ~6 m/s at contact
+    const s = this.shape(c, d, start, P, n, surface, plan);
+    s.aimDist = dist; s.plannedNormal = nrm; s.hitMosquito = aimM;
     // the start pose is the shown (pushed-out) pose: its correction is in it already
     this.corr = v();
-    this.swing = { phase: 'windup', t: 0, tApproach: ta, tContact: ta + ts, tEnd: ta + ts + (surface ? 0.36 : 0.40), start, pre, target, after, surface,
-      aimDist: dist, lean: plan.lean, crouch: plan.crouch, contact: null, plannedNormal: nrm, hitMosquito: aimM };
+    this.swing = s;
     this.swings++;
     return true;
+  }
+
+  /** The swing for a planned contact pose: approach to in front of the target, strike, recovery. */
+  private shape(c: CamFrame, d: V3, start: Pose, P: V3, n: V3, surface: boolean, plan: StrikePlan): Swing {
+    const target = plan.pose;
+    // approach: the swatter comes to ~40 cm in front of the target (outside a resting mosquito's alarm distance); less
+    // room for near targets
+    const eyeL = len(sub(P, c.eye)) - plan.lean;
+    const D = Math.max(0.12, Math.min(0.40, eyeL - 0.38));
+    // straight in the approach, held as the hand will hold it at contact: the head comes in at the handle's angle and
+    // slaps flat against the surface as the wire gives. (Tilted back 14 deg about the head instead, the handle swung
+    // toward the surface - a hand 1.4 cm inside the wall in front of it, pushed out, and not yet let go at contact.)
+    const pre = finishPose(add(P, n, -D), target.hn, target.hu, 0);
+    // recovery target after contact
+    const after = surface ? finishPose(add(P, n, -0.05), n, target.u, target.flex) : finishPose(add(P, d, 0.12), norm(add(d, c.up, -0.4)), target.u, target.flex);
+    const ta = Math.max(0.10, Math.min(0.30, 0.08 + 0.45 * len(sub(pre.h, start.h)) + 0.25 * Math.abs(plan.lean)));
+    const ts = 0.05 + 0.08 * D / 0.40;                    // ~0.13 s over 40 cm: ~3 m/s mean, ~6 m/s at contact
+    // (the face touches 4 mm before the surface, which is 12 mm before the aimed head centre)
+    const flush = surface ? Math.max(0.5, 1 - 0.016 / D) : 1;
+    return { phase: 'windup', t: 0, tApproach: ta, tContact: ta + ts, tEnd: ta + ts + (surface ? 0.36 : 0.40), start, pre, target, after, surface,
+      aimDist: 0, lean: plan.lean, crouch: plan.crouch, flush, contact: null, plannedNormal: n, hitMosquito: -1 };
+  }
+
+  /** How badly a planned swing runs into the room before its target (0 = not at all). At contact the hand, handle and
+   * head must be clear (the shown swatter is pushed out of anything it is in - as a whole, so off the target), and so
+   * must the approach pose in front of the target, less strictly (a push-out there is mostly let go by contact). The
+   * head and shaft must get to the target on the planned path without touching anything first (the swing stops at
+   * the first contact). A pose in the wall at contact counts worst, then one in the wall in front of the target, then
+   * a path that stops short; Infinity: at a glance, the handle runs through something from the head to the hand. */
+  private misfit(s: Swing, c: CamFrame, hand: number): number {
+    const { fwd, right } = bodyFrame(c.f, c.r);
+    const S = shoulderAt(leanedEye(c, s.lean, s.crouch), fwd, right, hand);
+    // (at contact the face is 4 mm off the surface: the sweep registers it there)
+    const at = s.surface ? finishPose(add(s.target.h, s.target.n, -0.016), s.target.n, s.target.u, s.target.flex) : s.target;
+    const hg = sub(at.grip, at.h), lg = len(hg);
+    if (this.bvh.raycast(at.h.x, at.h.y, at.h.z, hg.x / lg, hg.y / lg, hg.z / lg, lg, hit, 15) || this.doorRay(at.h, v(hg.x / lg, hg.y / lg, hg.z / lg), lg) < lg) return Infinity;
+    const inAt = this.penetration(at, S, v(), hand).depth;
+    if (inAt > FIT.contact) return 2 + inAt;
+    const inPre = this.penetration(s.pre, S, v(), hand).depth;
+    if (inPre > FIT.approach) return 1 + inPre;
+    // (a swatter that starts against something stops there whichever way it is turned: not tried again this swing)
+    if (this.startsBlocked) return 0;
+    const stop = this.firstContact(s);
+    if (stop && stop.t < 0.04) this.startsBlocked = true;
+    else if (stop && (!s.surface || len(sub(stop.h, at.h)) > FIT.reach)) return 0.5 + len(sub(stop.h, at.h));
+    return 0;
+  }
+  private startsBlocked = false;
+
+  /** Where and when the planned path of the swing first touches the world (no mosquitoes), or null: the sweep of the
+   * swing itself, in four steps through the approach and four through the strike (even in way: it accelerates) up to
+   * the aimed point beyond the surface. */
+  private firstContact(s: Swing): { h: V3; t: number } | null {
+    let t0 = 0, p0 = this.planned(s, 0);
+    for (let i = 1; i <= 8; i++) {
+      const t1 = i <= 4 ? s.tApproach * i / 4 : s.tApproach + (s.tContact - s.tApproach) * Math.pow((i - 4) / 4, 1 / 1.9);
+      const p1 = this.planned(s, t1);
+      const c = this.sweep(p0, p1, [], t0, t1, true);
+      if (c) return { h: blend(p0, p1, (c.t - t0) / Math.max(1e-6, t1 - t0)).h, t: c.t };
+      t0 = t1; p0 = p1;
+    }
+    return null;
+  }
+
+  /** Pose where the planned path from time t on first touches the world (within the planned strike), or null. */
+  private stopAhead(s: Swing, t: number): Pose | null {
+    const end = s.tContact + 0.02;
+    let t0 = t, p0 = this.planned(s, Math.min(t, s.tContact));
+    for (let i = 0; i < 12 && t0 < end; i++) {
+      const t1 = Math.min(end, t0 + 1 / 240), p1 = this.planned(s, Math.min(t1, s.tContact));
+      const c = this.sweep(p0, p1, [], t0, t1);
+      if (c) return blend(p0, p1, (c.t - t0) / Math.max(1e-6, t1 - t0));
+      t0 = t1; p0 = p1;
+    }
+    return null;
   }
 
   /** Pose along the planned motion at time t (no collision). */
@@ -248,8 +399,12 @@ export class SwingSystem {
       const k = (t - ta) / (tc - ta);
       const e = Math.pow(k, 1.9);                      // accelerate into contact
       const p = blend(s.pre, s.target, e);
-      const bow = Math.sin(Math.PI * e) * 0.025;       // short, slightly curved strike
-      return finishPose(add(p.h, v(0, 1, 0), bow), p.n, p.u, p.flex);
+      // short, slightly curved strike; the curve, the turn of the face and the bend of the wire are complete where the
+      // head meets the surface - they ran on to the aimed point 12 mm beyond it, and a short strike landed ~1 cm high,
+      // its face tilted
+      const w = Math.min(1, e / s.flush), o = w < 1 ? blend(s.pre, s.target, w) : s.target;
+      const bow = Math.sin(Math.PI * w) * 0.025;
+      return finishPose(add(p.h, v(0, 1, 0), bow), o.n, o.u, o.flex);
     }
     const hold = s.surface ? 0.07 : 0.0;
     const tr = t - tc;
@@ -280,7 +435,10 @@ export class SwingSystem {
         if (c) {
           s.contact = c; result = c; this.lastContact = c;
           // re-time: contact now; freeze target at contact pose (stop/deflect on obstacle)
-          const pc = blend(p0, p1, (c.t - t0) / Math.max(1e-6, (Math.min(t1, s.tContact + 0.02) - t0)));
+          let pc = blend(p0, p1, (c.t - t0) / Math.max(1e-6, (Math.min(t1, s.tContact + 0.02) - t0)));
+          // a resting mosquito is hit 11 mm before the face reaches it (its legs and a fair margin): the head goes on
+          // and slaps the surface it sits on (it stopped 1.4 cm short of the wall, still on the strike's curve)
+          if (c.mosquito >= 0 && !c.air) pc = this.stopAhead(s, c.t) ?? pc;
           s.target = pc;
           s.after = c.air ? finishPose(add(pc.h, pc.n, 0.1), pc.n, pc.u, pc.flex) : finishPose(add(pc.h, pc.n, -0.045), pc.n, pc.u, pc.flex);
           s.tContact = c.t; s.surface = !c.air; s.tEnd = c.t + (c.air ? 0.38 : 0.34);
@@ -558,11 +716,12 @@ export class SwingSystem {
   }
 
   /** Continuous collision of head rim/face and shaft between two poses. Earliest contact wins. */
-  private sweep(p0: Pose, p1: Pose, mosq: MosquitoTarget[], t0: number, t1: number): ContactInfo | null {
+  private sweep(p0: Pose, p1: Pose, mosq: MosquitoTarget[], t0: number, t1: number, light = false): ContactInfo | null {
     let best = 1.01; let bestInfo: ContactInfo | null = null;
     const W = SWATTER.headW / 2, Hh = SWATTER.headH / 2;
-    // sample rim + face points (local u along r, w along head up axis (-u))
-    const samples: [number, number][] = [[0, 0], [W, 0], [-W, 0], [0, Hh], [0, -Hh], [W * 0.8, Hh * 0.8], [-W * 0.8, Hh * 0.8], [W * 0.8, -Hh * 0.8], [-W * 0.8, -Hh * 0.8], [W * 0.5, 0], [-W * 0.5, 0]];
+    // sample rim + face points (local u along r, w along head up axis (-u)); light: centre and rim corners only
+    const samples: [number, number][] = light ? [[0, 0], [W * 0.8, Hh * 0.8], [-W * 0.8, Hh * 0.8], [W * 0.8, -Hh * 0.8], [-W * 0.8, -Hh * 0.8]]
+      : [[0, 0], [W, 0], [-W, 0], [0, Hh], [0, -Hh], [W * 0.8, Hh * 0.8], [-W * 0.8, Hh * 0.8], [W * 0.8, -Hh * 0.8], [-W * 0.8, -Hh * 0.8], [W * 0.5, 0], [-W * 0.5, 0]];
     const dtS = t1 - t0;
     const speed = len(sub(p1.h, p0.h)) / Math.max(1e-6, dtS);
     for (const [a, b] of samples) {
