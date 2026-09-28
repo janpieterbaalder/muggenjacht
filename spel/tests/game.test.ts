@@ -79,3 +79,28 @@ test('shader anchor of the lightmap plugin and the built-in white balance exist 
   assert.ok(readFileSync(join(inc, 'pbrBlockFinalLitComponents.js'), 'utf8').includes(IRRADIANCE_LINE));
   assert.ok(readFileSync(join(inc, 'imageProcessingFunctions.js'), 'utf8').includes('result.rgb=whiteBalanceMatrix*result.rgb'), 'built-in white balance before exposure');
 });
+
+test('lightmap: a face whose island the export collapsed to a line takes the mapping of the proper face it lies on', async () => {
+  // the end of the wall beside the niche before the bathroom door lies twice in the export, once with its lightmap island
+  // collapsed to a line of unbaked texels: where only that one covered it, a black patch under the ceiling (28-09-2026)
+  const { collapsedLightmapFixes } = await import('../src/engine/world');
+  const P: number[] = [], UV: number[] = [], I: number[] = [];
+  const quad = (pts: number[][], uv: (p: number[]) => number[]) => {
+    const b = P.length / 3;
+    for (const p of pts) { P.push(...p); UV.push(...uv(p)); }
+    I.push(b, b + 1, b + 2, b, b + 2, b + 3);
+  };
+  const proper = (p: number[]) => [0.1 + 0.05 * p[2], 0.2 + 0.05 * p[1]], line = (p: number[]) => [0.5 + 0.01 * p[2], 0.5];
+  quad([[0, 0, 0], [0, 0, 2], [0, 2, 2], [0, 2, 0]], proper);                      // 0, 1: wall x = 0 with a proper island
+  quad([[0, 1, 0], [0, 1, 0.5], [0, 2, 0.5], [0, 2, 0]], line);                    // 2, 3: collapsed, on that wall
+  quad([[0.01, 1, 0], [0.01, 1, 0.5], [0.01, 2, 0.5], [0.01, 2, 0]], line);        // 4, 5: collapsed, 1 cm in front of it
+  quad([[0, 1, 3], [0, 1, 3.5], [0, 2, 3.5], [0, 2, 3]], line);                    // 6, 7: collapsed, in its plane beside it
+  quad([[0, 1, 1], [0, 1, 1.02], [0, 1.02, 1.02], [0, 1.02, 1]], line);            // 8, 9: collapsed, too small to show
+  const fixes = collapsedLightmapFixes(P, UV, I, 2048);
+  assert.deepEqual([...fixes.keys()].sort((a, b) => a - b), [2, 3], 'only the collapsed faces on the proper one');
+  assert.equal(collapsedLightmapFixes(P, UV, I, 2048, { x0: -1, z0: 1, x1: 1, z1: 4 }).size, 0, 'only faces with their middle in the box');
+  for (const t of [2, 3]) for (let k = 0; k < 3; k++) {
+    const v = I[3 * t + k], want = proper(P.slice(3 * v, 3 * v + 3)), got = fixes.get(t)!.slice(2 * k, 2 * k + 2);
+    assert.ok(Math.abs(got[0] - want[0]) < 1e-6 && Math.abs(got[1] - want[1]) < 1e-6, `tri ${t} corner ${k}: ${got} vs ${want}`);
+  }
+});

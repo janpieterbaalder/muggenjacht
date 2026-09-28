@@ -241,6 +241,11 @@ export async function loadWorld(scene: Scene, onProgress: (f: number, label: str
       m.freezeWorldMatrix();
     }
   }
+  // faces whose lightmap island the export collapsed to a line of unbaked texels (LIGHTMAP_FIXES)
+  for (const f of LIGHTMAP_FIXES) {
+    const m = statics.find((s) => s.name === f.mesh), atlas = String(((m?.metadata?.gltf?.extras ?? {}) as Record<string, unknown>).atlas ?? '');
+    if (m instanceof Mesh && atlas) repairLightmapUVs(m, meta.lm.dag?.[atlas]?.size ?? 2048, f);
+  }
   // the ceiling where the export leaves it open (CEILING_FILLS): its underside in the material and light of the ceiling
   // it continues
   for (const f of coll.fills) {
@@ -649,3 +654,87 @@ export const DOOR_SPEC: Record<string, { width: number; dir: [number, number]; s
   douche: { width: 0.77, dir: [0, -1], sign: 1, start: 0, axis: 'x' },      // D51: shower frame 0.08-0.92 (R10/R13)
 };
 void Matrix; void Quaternion; void PROBE_POS;
+/** Where the export collapsed a face's lightmap island to a line of unbaked texels, drawn black (mesh, x-z box of the
+ * faces' middles; Babylon frame): the 3 cm end of the living-room wall beside the niche before the bathroom door lies twice
+ * in the export, once with a proper island and once (whole) with a collapsed one - where only that one covers it, above
+ * the bedroom door frame, a black patch under the ceiling - and so does the lintel end facing it. Only here: over the whole
+ * house the same repair also took faces whose line happens to lie in baked light, and made them dark (veranda, siding).
+ * To be fixed at the source, hulpmiddelen/chalet; a face with a proper island is left as it is. */
+export const LIGHTMAP_FIXES = [{ mesh: 'S_A_wall_woon', x0: 6.15, z0: -1.35, x1: 6.45, z1: -0.05 }];
+export type LightmapFix = typeof LIGHTMAP_FIXES[number];
+
+/** Lightmap UVs for triangles whose island the export collapsed to a line (under a quarter texel of the atlas, at least
+ * 10 cm2 of surface, the middle in box when given) where a face in the same plane with a proper island lies over them:
+ * that face's mapping, carried on over the whole triangle. P: world positions. Returns triangle -> its three new UV pairs. */
+export function collapsedLightmapFixes(P: ArrayLike<number>, UV: ArrayLike<number>, I: ArrayLike<number>, atlasSize = 2048,
+  box?: { x0: number; z0: number; x1: number; z1: number }): Map<number, number[]> {
+  const out = new Map<number, number[]>(), nt = I.length / 3, px = atlasSize * atlasSize;
+  const pt = (i: number) => [P[3 * i], P[3 * i + 1], P[3 * i + 2]];
+  const texels = (t: number) => {
+    const a = I[3 * t] * 2, b = I[3 * t + 1] * 2, c = I[3 * t + 2] * 2;
+    return 0.5 * Math.abs((UV[b] - UV[a]) * (UV[c + 1] - UV[a + 1]) - (UV[c] - UV[a]) * (UV[b + 1] - UV[a + 1])) * px;
+  };
+  const face = (t: number) => {
+    const v = [pt(I[3 * t]), pt(I[3 * t + 1]), pt(I[3 * t + 2])];
+    const e1 = [0, 1, 2].map((k) => v[1][k] - v[0][k]), e2 = [0, 1, 2].map((k) => v[2][k] - v[0][k]);
+    const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]], l = Math.hypot(n[0], n[1], n[2]) || 1;
+    return { t, v, e1, e2, n: n.map((q) => q / l), area: l / 2 };
+  };
+  type Face = ReturnType<typeof face>;
+  const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  /** barycentric coordinates of p in f's plane (outside the triangle too) */
+  const bary = (f: Face, p: number[]) => {
+    const w = [p[0] - f.v[0][0], p[1] - f.v[0][1], p[2] - f.v[0][2]];
+    const a = dot(f.e1, f.e1), b = dot(f.e1, f.e2), c = dot(f.e2, f.e2), d = dot(f.e1, w), e = dot(f.e2, w), det = a * c - b * b;
+    const l1 = (c * d - b * e) / det, l2 = (a * e - b * d) / det;
+    return [1 - l1 - l2, l1, l2];
+  };
+  /** the two triangles (same plane) overlap by more than touching: some corner or the middle of one inside the other */
+  const overlap = (f: Face, g: Face) => [f, g].some((x) => {
+    const y = x === f ? g : f;
+    const inner = [...y.v, [0, 1, 2].map((k) => (y.v[0][k] + y.v[1][k] + y.v[2][k]) / 3)].map((q, i) => i < 3 ? q.map((c, k) => c + (y.v[(i + 1) % 3][k] + y.v[(i + 2) % 3][k] - 2 * c) * 0.02) : q);
+    return inner.some((q) => bary(x, q).every((l) => l > 1e-4));
+  });
+  let proper: Face[] | null = null;
+  for (let t = 0; t < nt; t++) {
+    if (texels(t) >= 0.25) continue;
+    const f = face(t), cx = (f.v[0][0] + f.v[1][0] + f.v[2][0]) / 3, cz = (f.v[0][2] + f.v[1][2] + f.v[2][2]) / 3;
+    if (f.area < 0.001 || (box && (cx < box.x0 || cx > box.x1 || cz < box.z0 || cz > box.z1))) continue;
+    proper ??= Array.from({ length: nt }, (_, q) => q).filter((q) => texels(q) >= 1).map(face);
+    const over = proper.filter((g) => Math.abs(dot(g.n, f.n)) > 0.999 && Math.abs(dot(g.n, [f.v[0][0] - g.v[0][0], f.v[0][1] - g.v[0][1], f.v[0][2] - g.v[0][2]])) < 0.001 && overlap(f, g));
+    if (!over.length) continue;
+    const g = over.reduce((x, y) => (y.area > x.area ? y : x));
+    out.set(t, f.v.flatMap((p) => {
+      const l = bary(g, p), ia = I[3 * g.t] * 2, ib = I[3 * g.t + 1] * 2, ic = I[3 * g.t + 2] * 2;
+      return [l[0] * UV[ia] + l[1] * UV[ib] + l[2] * UV[ic], l[0] * UV[ia + 1] + l[1] * UV[ib + 1] + l[2] * UV[ic + 1]];
+    }));
+  }
+  return out;
+}
+
+/** Apply collapsedLightmapFixes (in the fix's box) to a mesh: the fixed triangles get vertices of their own with the new
+ * lightmap UVs. */
+function repairLightmapUVs(m: Mesh, atlasSize: number, fix: LightmapFix): number {
+  const pos = m.getVerticesData(VertexBuffer.PositionKind), uv2 = m.getVerticesData(VertexBuffer.UV2Kind), ind = m.getIndices();
+  if (!pos || !uv2 || !ind) return 0;
+  const wm = m.computeWorldMatrix(true).m, w = new Float32Array(pos.length);
+  for (let i = 0; i < pos.length; i += 3) {
+    const x = pos[i], y = pos[i + 1], z = pos[i + 2];
+    w[i] = wm[0] * x + wm[4] * y + wm[8] * z + wm[12]; w[i + 1] = wm[1] * x + wm[5] * y + wm[9] * z + wm[13]; w[i + 2] = wm[2] * x + wm[6] * y + wm[10] * z + wm[14];
+  }
+  const fixes = collapsedLightmapFixes(w, uv2, ind, atlasSize, fix);
+  if (!fixes.size) return 0;
+  const kinds = m.getVerticesDataKinds(), indices = Array.from(ind);
+  const data = new Map(kinds.map((k) => [k, Array.from(m.getVerticesData(k)!)]));
+  const size = new Map(kinds.map((k) => [k, m.getVertexBuffer(k)!.getSize()]));
+  for (const [t, uvs] of fixes) for (let k = 0; k < 3; k++) {
+    const src = indices[3 * t + k], dst = data.get(VertexBuffer.PositionKind)!.length / 3;
+    for (const kind of kinds) { const s = size.get(kind)!, arr = data.get(kind)!; for (let j = 0; j < s; j++) arr.push(arr[src * s + j]); }
+    const u = data.get(VertexBuffer.UV2Kind)!;
+    u[dst * 2] = uvs[2 * k]; u[dst * 2 + 1] = uvs[2 * k + 1];
+    indices[3 * t + k] = dst;
+  }
+  for (const kind of kinds) m.setVerticesData(kind, data.get(kind)!, false, size.get(kind));
+  m.setIndices(indices);
+  return fixes.size;
+}
