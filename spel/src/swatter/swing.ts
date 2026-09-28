@@ -380,16 +380,33 @@ export class SwingSystem {
           for (let j = i; j < pts.length; j++) if (below(i, j)) deeper(dot(sub(hp, pts[j]), n), n, true);
           break;
         }
-        // where the segment comes out again, or its end if still inside
-        const x = add(hp, dn, 1e-4);
+        // where the segment comes out again, or its end if still inside - past faces going in again (overlapping solids)
+        // and through where two solids touch (an exit face with the next solid's entry face on it: the stretch goes on)
         let out = L;
-        if (this.bvh.raycast(x.x, x.y, x.z, dn.x, dn.y, dn.z, L - t - 1e-4, hit, 15)) { out = t + 1e-4 + hit.t; if (i > 1) deeper(dot(sub(hp, add(a, dn, out)), n), n, false); }
+        for (let from = t, m = 0; m < 6; m++) {
+          const x = add(a, dn, from + 1e-4);
+          if (!this.bvh.raycast(x.x, x.y, x.z, dn.x, dn.y, dn.z, L - from - 1e-4, hit, 15)) break;
+          from += 1e-4 + hit.t;
+          this.bvh.normal(hit.tri, gn);
+          if (gn[0] * dn.x + gn[1] * dn.y + gn[2] * dn.z <= 0) continue;
+          const y = add(a, dn, from + 1e-3);
+          if (this.bvh.raycast(y.x, y.y, y.z, dn.x, dn.y, dn.z, 0.5, hit, 15)) { this.bvh.normal(hit.tri, gn); if (gn[0] * dn.x + gn[1] * dn.y + gn[2] * dn.z > 0) continue; }
+          out = from; break;
+        }
+        if (out < L) { if (i > 1) deeper(dot(sub(hp, add(a, dn, out)), n), n, false); }
         else {
+          // (inside: a ray from the end toward the free side leaves the object - or, where the object is open that way
+          // (a jamb board against a wall), one onward along the segment does; then its depth behind the entry face)
           const dd = dot(sub(hp, b), n), far = Math.max(0, dd) + 0.05;
+          let th = -1;
           if (this.bvh.raycast(b.x, b.y, b.z, n.x, n.y, n.z, far, hit, 15)) {
             this.bvh.normal(hit.tri, gn);
-            if (gn[0] * n.x + gn[1] * n.y + gn[2] * n.z > 0) deeper(Math.min(dd, hit.t), n, false);
+            if (gn[0] * n.x + gn[1] * n.y + gn[2] * n.z > 0) th = hit.t;
+          } else if (this.bvh.raycast(b.x, b.y, b.z, dn.x, dn.y, dn.z, 0.5, hit, 15)) {
+            this.bvh.normal(hit.tri, gn);
+            if (gn[0] * dn.x + gn[1] * dn.y + gn[2] * dn.z > 0) th = dd;
           }
+          if (th >= 0) deeper(Math.min(dd, th), n, false);
         }
         // chain points further on, behind the face where it covers them and hidden from the shoulder by the object
         // (past the arm line only the hand's own points: the swatter reaching around a fixture the line grazes is not

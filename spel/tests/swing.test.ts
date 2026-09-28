@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { boxesToBVH, prismToBVH } from './helpers';
 import { SwingSystem, restPose, type CamFrame, type MosquitoTarget, type ContactInfo } from '../src/swatter/swing';
+import { parseCollision } from '../src/physics/bvh';
 import { ARM_PLAN_MAX, WRIST, armPole, bodyFrame, handOnHandle, lookTiptoe, shoulderAt, solveArm, wristAngles } from '../src/swatter/armgeom';
 
 const cam: CamFrame = { eye: { x: 2, y: 1.6, z: 2 }, f: { x: 1, y: 0, z: 0 }, r: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 } };
@@ -196,6 +199,24 @@ test('turning past a wall cupboard with a bevelled edge, the resting swatter doe
     }
     assert.ok(worst < 0.03, `bottom ${yb} m, ${dx} m ahead, pitch ${pitch}, hand ${hand}: the shown head moved ${(worst * 1000).toFixed(0)} mm more than the rest pose in one frame`);
   }
+});
+
+test('standing still before a wall cupboard in the chalet, the resting swatter stays put', () => {
+  // its wire grazes the cupboard's 2 mm bevel with every breath: 18 cm jumps with the measure of before, and still a 2 cm
+  // step each breath with that measure and a limit on the correction (a real spot of the collision mesh)
+  const buf = readFileSync(join(process.cwd(), 'public', 'assets', 'chalet_coll.bin'));
+  const bvh = parseCollision(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  const yaw = 135 * Math.PI / 180, p = 20 * Math.PI / 180;
+  const f = { x: Math.cos(yaw) * Math.cos(p), y: Math.sin(p), z: -Math.sin(yaw) * Math.cos(p) }, r = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) };
+  const c: CamFrame = { eye: { x: 5.0112, y: 1.62, z: -2.9809 }, f, r, up: { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x } };
+  const sys = new SwingSystem(bvh, noDoors);
+  let prev = null as null | { x: number; y: number; z: number }, worst = 0;
+  for (let i = 0; i < 600; i++) {
+    sys.update(1 / 60, sys.restFor(c, 1, i / 60), [], c, 1);
+    if (prev && i > 60) worst = Math.max(worst, dist(sys.pose.h, prev));
+    prev = { ...sys.pose.h };
+  }
+  assert.ok(worst < 0.003, `the head moved ${(worst * 1000).toFixed(1)} mm in one frame`);
 });
 
 test('a door leaf swinging into the resting swatter pushes it out at once', () => {
