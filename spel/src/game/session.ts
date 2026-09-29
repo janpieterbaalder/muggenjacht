@@ -4,7 +4,7 @@ import type { Core } from './core';
 import type { AudioEngine } from '../audio/audio';
 import { SURFACE_CLASSES, type Surface } from '../audio/audio';
 import type { Save } from './save';
-import { ROUNDS, type RoundDef, type Spawn } from './rounds';
+import { ROUNDS, PRACTICE, type RoundDef, type Spawn } from './rounds';
 import { settleLeaves } from './doors';
 import { MosquitoBrain, type Threat } from '../mosquito/brain';
 import { MosquitoVisual } from '../mosquito/visual';
@@ -90,6 +90,8 @@ export class Session {
   private incomingLeft = 0; private incomingTimer = 0;
   private stepPhase = 0; private endTimer = -1;
   private idCounter = 1; private whooshed = false;
+  /** practice: room the last mosquito came from (the next one comes from another) */
+  private lastPracticeRoom = '';
   private armLoaded: Promise<void>;
   private threat: Threat = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, active: false };
 
@@ -134,18 +136,19 @@ export class Session {
     this.core.placePlayer(r.player.x, r.player.z, r.player.yaw);
     // the round's door angles; two leaves set against or through each other are settled (the wc and kids-room-1 doors
     // share a corner: both set wide open, rounds 9 and 10 locked both)
-    const doors = this.core.world.doors;
-    for (const d of doors) { d.angle = d.target = r.doors?.[d.id] ?? 0; d.moving = false; }
+    const doors = this.core.world.doors, start = practice ? PRACTICE.doors : r.doors;
+    for (const d of doors) { d.angle = d.target = start?.[d.id] ?? 0; d.moving = false; }
     settleLeaves(doors);
     for (const d of doors) d.node.rotation.y = d.closedYaw + d.angle * d.openSign;
     this.mosq = [];
-    const spawns: Spawn[] = practice ? [{ room: 'woon' }, { room: 'woon', resting: true }, { room: 'woon' }] : r.mosquitoes;
+    // practice: one mosquito at a time, somewhere in the chalet (respawn)
+    const spawns: Spawn[] = practice ? [this.practiceSpawn()] : r.mosquitoes;
     for (const s of spawns) this.spawn(s, r);
     this.incomingLeft = practice ? 0 : r.incoming?.count ?? 0; this.incomingTimer = 2;
     this.adaptNow(this.core.player.x, this.core.player.z);
     this.audio.startAmbience(r.light);
-    this.ui.onObjective(practice ? 'Oefenen' : `Ronde ${index + 1} · ${r.place}`, practice ? 'Vrij oefenen in de woonkamer' : r.objective);
-    this.ui.onToast(practice ? 'Oefenen: geraakte muggen komen terug.' : r.intro, 2600);
+    this.ui.onObjective(practice ? 'Oefenen' : `Ronde ${index + 1} · ${r.place}`, practice ? 'Vrij oefenen in het hele chalet' : r.objective);
+    this.ui.onToast(practice ? 'Oefenen: steeds één mug, ergens in het chalet.' : r.intro, 2600);
     this.ui.onBites(0); this.ui.onHint('');
     this.active = true; this.paused = false;
     this.core.running = true; this.core.input.enabled = true;
@@ -419,7 +422,7 @@ export class Session {
     if (terras && terras.angle < 0.05) {
       for (const m of this.mosq) {
         if (!m.brain.alive || !clearlyOutside(m.brain.x, m.brain.z)) continue;   // not one at the inside of a pane
-        m.brain.setState('gone'); this.audio.stopMosquito(m.brain.id); m.vis.root.setEnabled(false);
+        m.brain.setState('gone'); this.audio.stopMosquito(m.brain.id); m.vis.root.setEnabled(false); m.deadAt = this.t;
         this.ui.onToast('Eén vloog naar buiten. Die telt niet meer mee.', 2200);
         core.metrics.event('gone-outside', { id: m.brain.id });
       }
@@ -458,7 +461,7 @@ export class Session {
       this.audio.footstep(surf, core.player.x, core.player.y + 0.05, core.player.z);
     }
     this.hints();
-    // --- practice: killed mosquitoes come back; round end after silence
+    // --- practice: a killed mosquito (or one gone outside) is followed by the next one; round end after silence
     if (this.practice) {
       for (const m of [...this.mosq]) if (!m.brain.alive && m.deadAt >= 0 && this.t - m.deadAt > 3) this.respawn(m);
       return;
@@ -471,7 +474,16 @@ export class Session {
   private respawn(m: Mosq) {
     const i = this.mosq.indexOf(m); m.vis.dispose(); this.mosq.splice(i, 1);
     this.audio.stopMosquito(m.brain.id);
-    this.spawn({ room: 'woon' }, this.round);
+    this.spawn(this.practiceSpawn(), this.round);
+  }
+
+  /** Practice: the next mosquito in a random room of the chalet, not the one the last one came from; flying or already
+   * settling on a surface there. */
+  private practiceSpawn(): Spawn {
+    const rooms = PRACTICE.rooms.filter((q) => q !== this.lastPracticeRoom);
+    const room = rooms[Math.floor(Math.random() * rooms.length)];
+    this.lastPracticeRoom = room;
+    return { room, resting: Math.random() < 0.5 };
   }
 
   /** Walls and door leaves between listener and mosquito: 0 clear .. 1 behind two or more obstacles. */
@@ -520,7 +532,8 @@ export class Session {
   }
 
   private hints() {
-    if (this.helpLevel === 'uit' || this.practice) { this.ui.onHint(''); return; }
+    // (practice too: the mosquito can be in any room of the chalet)
+    if (this.helpLevel === 'uit') { this.ui.onHint(''); return; }
     const idle = this.t - this.lastProgress;
     if (idle < (this.helpLevel === 'veel' ? 25 : 45)) { this.ui.onHint(''); return; }
     const alive = this.mosq.filter((m) => m.brain.alive);

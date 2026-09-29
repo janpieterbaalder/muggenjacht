@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readCollision, TriBVH } from '../src/physics/bvh';
 import { fillCeilings, measureMaxOpen, DOOR_SPEC } from '../src/engine/world';
-import { ROUNDS } from '../src/game/rounds';
+import { ROUNDS, PRACTICE } from '../src/game/rounds';
 import { stepLeaf, settleLeaves, touchingPairs, leafGap, LATCHED, LEAF_GAP, type Leaf } from '../src/game/doors';
 
 const assets = join(process.cwd(), 'public', 'assets');
@@ -55,10 +55,10 @@ test('doors: hinges and openings as loaded (kids room 2 stops at the corner sofa
   assert.ok(byId(DOORS, 'kind2').maxOpen < 1.0 && byId(DOORS, 'kind1').maxOpen > 1.5, `${byId(DOORS, 'kind2').maxOpen} ${byId(DOORS, 'kind1').maxOpen}`);
 });
 
-test('every round starts with each door within its opening and no two leaves against each other', () => {
+test('every round and the practice start with each door within its opening and no two leaves against each other', () => {
   // (the terrace door's measured stop is its own frame beside the hinge - the plan model has no hinge offset -, not
   // furniture: round 4 starts it at 83 deg)
-  for (const [name, angles] of ROUNDS.map((r) => [r.id, r.doors ?? {}] as const)) {
+  for (const [name, angles] of [...ROUNDS.map((r) => [r.id, r.doors ?? {}] as const), ['oefenen', PRACTICE.doors] as const]) {
     for (const [id, a] of Object.entries(angles)) {
       const d = DOORS.find((q) => q.id === id);
       assert.ok(d, `${name}: unknown door ${id}`);
@@ -123,4 +123,9 @@ test('two doors in one wall, latch side to latch side, do not hold each other aj
     toggle(d); run(doors, 4);
     assert.ok(d.angle > 0.9, `${id} opens again`);
   }
+});
+
+test('practice: its rooms are the six rooms of the chalet', async () => {
+  const { ROOM_BOXES } = await import('../src/engine/world');
+  assert.deepEqual([...PRACTICE.rooms].sort(), Object.keys(ROOM_BOXES).filter((r) => r !== 'buiten').sort());
 });

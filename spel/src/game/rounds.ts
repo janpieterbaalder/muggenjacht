@@ -49,3 +49,11 @@ export const ROUNDS: RoundDef[] = [
     player: { x: 4.3, z: -1.9, yaw: N }, mosquitoes: [{ room: 'woon' }, { room: 'kind1' }, { room: 'kind2' }, { room: 'ouder' }, { room: 'bad', resting: true }],
     alert: 1.0, hostDrive: 0.45, rest: [5, 14], speed: 0.56, doors: { kind1: 1.4, kind2: 0.9, ouder: 1.4, bad: 1.4, wc: 0.2 } },
 ];
+
+/** Practice (menu 'Oefenen'): the whole chalet, one mosquito at a time in a random room, the next one in another room.
+ * Interior doors open as far as they go; the wc door stays ajar behind the open door of kids room 1 (both hinge in one
+ * corner: a leaf is pushed aside by the other, doors.ts). Light, start spot and mosquito tuning as round 1. */
+export const PRACTICE = {
+  doors: { kind1: 1.4, kind2: 0.9, ouder: 1.4, bad: 1.4, wc: 0.2 } as Record<string, number>,
+  rooms: ['woon', 'kind1', 'kind2', 'ouder', 'bad', 'wc'],
+};
