@@ -503,7 +503,7 @@ async function fetchJson(url: string): Promise<unknown> {
 /** Sweep the leaf from closed to 95 deg and stop 3 deg before it would touch furniture or a wall. Triangles that
  * already touch the leaf when (almost) closed - frame, stop, threshold - are ignored. E.g. the door of kids room 2
  * meets the corner sofa just before 90 deg (R08 layout). */
-function measureMaxOpen(bvh: TriBVH, d: Door): number {
+export function measureMaxOpen(bvh: TriBVH, d: { hinge: { x: number; z: number }; width: number; closedYaw: number; leafDir: { x: number; z: number }; openSign: number }): number {
   const out = new Float32Array(3);
   const R = 0.028;                                   // half leaf thickness + clearance
   const touching = (a: number, ignore: Set<number> | null, collect: Set<number> | null) => {

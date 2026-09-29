@@ -9,6 +9,7 @@ import { loadWorld, roomAt, type World, type Door } from '../engine/world';
 import { PlayerBody, PLAYER, CLIMB } from '../physics/player';
 import { Input } from '../input/input';
 import { Metrics } from '../diag/metrics';
+import { leafSegment, swingTo, stepLeaf, LATCHED, type Seg } from './doors';
 
 import { BUILD, COMFORT } from './build';
 export { BUILD, COMFORT };
@@ -170,23 +171,19 @@ export class Core {
   }
 
   /** Open a closed (or closing) door fully; close an open or opening one. */
-  toggleDoor(d: Door) { d.target = d.target > 0.05 ? 0 : d.maxOpen; d.moving = true; }
+  toggleDoor(d: Door) { d.target = d.target > LATCHED ? 0 : d.maxOpen; d.moving = true; }
 
   /** Leaf of a door at a given angle as a 2D segment (hinge -> free edge). */
-  leafSegment(d: Door, angle: number): [number, number, number, number] {
-    const yaw = d.closedYaw + angle * d.openSign;
-    const c = Math.cos(yaw), s = Math.sin(yaw);
-    const lx = d.leafDir.x * c + d.leafDir.z * s, lz = -d.leafDir.x * s + d.leafDir.z * c;
-    return [d.hinge.x, d.hinge.z, d.hinge.x + lx * d.width, d.hinge.z + lz * d.width];
-  }
+  leafSegment(d: Door, angle: number): Seg { return leafSegment(d, angle); }
 
   /** A door that stands open gives way when you walk into its leaf, as a real one does (REVIEW-01 G-08: with the en-suite
    * door open - it swings into the bathroom right behind the bathroom doorway - you could not get from the living room
-   * into the bathroom). A closed door is latched: it only opens by its handle. The pushed leaf stays where it is left. */
+   * into the bathroom). A closed door is latched: it only opens by its handle. The pushed leaf stays where it is left; an
+   * open leaf it meets is pushed aside in turn (doors.ts). */
   private pushDoors(dt: number, wantX: number, wantZ: number) {
     const p = this.player, touch = PLAYER.radius + 0.022 + 0.012;
     for (const d of this.world.doors) {
-      if (d.moving || d.angle < 0.05) continue;
+      if (d.moving || d.angle < LATCHED) continue;
       const [ax, az, bx, bz] = this.leafSegment(d, d.angle);
       const ex = bx - ax, ez = bz - az, L = Math.hypot(ex, ez);
       const t = Math.max(0, Math.min(1, ((p.x - ax) * ex + (p.z - az) * ez) / (L * L)));
@@ -201,58 +198,32 @@ export class Core {
       let a = d.angle + way * push * dt / lever;
       a = Math.max(0, Math.min(d.maxOpen, a));
       if (a < 0.03) a = 0;                                           // pushed shut: the latch clicks in
-      d.angle = d.target = a;
-      d.node.rotation.y = d.closedYaw + a * d.openSign;
+      const moved = new Set<Door>();
+      swingTo(this.world.doors, d, a, (s) => this.playerClear(s), moved, false);
+      d.target = d.angle;
+      for (const m of moved) m.node.rotation.y = m.closedYaw + m.angle * m.openSign;
     }
   }
 
+  /** The player's body is clear of a leaf at this segment (a door swung toward you stops in the swing when you are in the
+   * way: it stays ajar and carries on as soon as you step back, its target is kept). */
+  private playerClear(seg: Seg): boolean {
+    const p = this.player, [ax, az, bx, bz] = seg;
+    const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9;
+    const t = Math.max(0, Math.min(1, ((p.x - ax) * ex + (p.z - az) * ez) / L2));
+    return Math.hypot(p.x - ax - ex * t, p.z - az - ez * t) >= PLAYER.radius + 0.03;
+  }
+
   private updateDoors(dt: number) {
+    const moved = new Set<Door>();
     for (const d of this.world.doors) {
       // the leaves are baked closed: from ~3 deg on their light blends into the probe of the room they swing into
       const k = Math.min(1, Math.max(0, (d.angle - 0.05) / 0.55)), ibl = k * k * (3 - 2 * k);
       const g = this.world.diffuseGain(d.room);
       for (const pl of d.lm) { pl.ibl = ibl; pl.iblGain = g; }
-      if (Math.abs(d.target - d.angle) < 1e-3) { d.moving = false; continue; }
-      // hand-pushed swing: eased, at most ~2.4 rad/s
-      let next = d.angle + (d.target - d.angle) * (1 - Math.exp(-6 * dt));
-      const maxStep = 2.4 * dt;
-      next = d.angle + Math.max(-maxStep, Math.min(maxStep, next - d.angle));
-      const seg = this.leafSegment(d, next);
-      // another door leaf in the way (wc and kids-room doors share a corner): the door waits there
-      let blocked = false;
-      for (const o of this.world.doors) {
-        if (o === d || Math.hypot(o.hinge.x - d.hinge.x, o.hinge.z - d.hinge.z) > d.width + o.width + 0.1) continue;
-        if (segSegDist(seg, this.leafSegment(o, o.angle)) < 0.045) { blocked = true; break; }
-      }
-      // the player: a door pulled toward you makes you step back; if there is no room behind you it stops
-      // the player in the swing: the door stays ajar and carries on as soon as you step back (target is kept)
-      if (!blocked) {
-        const p = this.player;
-        const [ax, az, bx, bz] = seg;
-        const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez;
-        const t = Math.max(0, Math.min(1, ((p.x - ax) * ex + (p.z - az) * ez) / L2));
-        if (Math.hypot(p.x - ax - ex * t, p.z - az - ez * t) < PLAYER.radius + 0.03) blocked = true;
-      }
-      if (blocked) { d.moving = false; continue; }
-      d.angle = next;
-      d.node.rotation.y = d.closedYaw + d.angle * d.openSign;
+      // (the wc and kids-room-1 doors share a corner: one pushes the other's open leaf aside)
+      stepLeaf(this.world.doors, d, dt, (s) => this.playerClear(s), moved);
     }
+    for (const m of moved) m.node.rotation.y = m.closedYaw + m.angle * m.openSign;
   }
 }
-
-function segSegDist(a: [number, number, number, number], b: [number, number, number, number]): number {
-  const pd = (px: number, pz: number, s: [number, number, number, number]) => {
-    const ex = s[2] - s[0], ez = s[3] - s[1], L2 = ex * ex + ez * ez || 1e-9;
-    const t = Math.max(0, Math.min(1, ((px - s[0]) * ex + (pz - s[1]) * ez) / L2));
-    return Math.hypot(px - s[0] - ex * t, pz - s[1] - ez * t);
-  };
-  const cross = (ax: number, az: number, bx: number, bz: number) => ax * bz - az * bx;
-  const d1x = a[2] - a[0], d1z = a[3] - a[1], d2x = b[2] - b[0], d2z = b[3] - b[1];
-  const den = cross(d1x, d1z, d2x, d2z);
-  if (Math.abs(den) > 1e-9) {
-    const t = cross(b[0] - a[0], b[1] - a[1], d2x, d2z) / den, u = cross(b[0] - a[0], b[1] - a[1], d1x, d1z) / den;
-    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return 0;
-  }
-  return Math.min(pd(a[0], a[1], b), pd(a[2], a[3], b), pd(b[0], b[1], a), pd(b[2], b[3], a));
-}
-
