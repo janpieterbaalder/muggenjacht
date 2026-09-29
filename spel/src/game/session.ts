@@ -5,6 +5,7 @@ import type { AudioEngine } from '../audio/audio';
 import { SURFACE_CLASSES, type Surface } from '../audio/audio';
 import type { Save } from './save';
 import { ROUNDS, type RoundDef, type Spawn } from './rounds';
+import { settleLeaves } from './doors';
 import { MosquitoBrain, type Threat } from '../mosquito/brain';
 import { MosquitoVisual } from '../mosquito/visual';
 import { SwingSystem, restPose, type CamFrame, type ContactInfo, type MosquitoTarget, type V3 } from '../swatter/swing';
@@ -131,10 +132,12 @@ export class Session {
     this.t = 0; this.bites = 0; this.kills = 0; this.lastProgress = 0; this.endTimer = -1; this.swing.swings = 0;
     this.core.world.setState(r.light);
     this.core.placePlayer(r.player.x, r.player.z, r.player.yaw);
-    for (const d of this.core.world.doors) {
-      const a = r.doors?.[d.id] ?? 0;
-      d.angle = d.target = a; d.moving = false; d.node.rotation.y = d.closedYaw + a * d.openSign;
-    }
+    // the round's door angles; two leaves set against or through each other are settled (the wc and kids-room-1 doors
+    // share a corner: both set wide open, rounds 9 and 10 locked both)
+    const doors = this.core.world.doors;
+    for (const d of doors) { d.angle = d.target = r.doors?.[d.id] ?? 0; d.moving = false; }
+    settleLeaves(doors);
+    for (const d of doors) d.node.rotation.y = d.closedYaw + d.angle * d.openSign;
     this.mosq = [];
     const spawns: Spawn[] = practice ? [{ room: 'woon' }, { room: 'woon', resting: true }, { room: 'woon' }] : r.mosquitoes;
     for (const s of spawns) this.spawn(s, r);

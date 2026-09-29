@@ -7,7 +7,7 @@ export interface RoundDef {
   id: string; title: string; place: string; light: LightState; intro: string; objective: string;
   player: { x: number; z: number; yaw: number };
   mosquitoes: Spawn[]; alert: number; hostDrive: number; rest: [number, number]; speed: number;
-  doors?: Record<string, number>;            // initial door angles (rad), default closed
+  doors?: Record<string, number>;            // initial door angles (rad), default closed; within each door's opening, leaves clear of each other (tests/doors.test.ts)
   incoming?: { count: number; every: number; untilDoorClosed: string; from: [number, number, number] };
   silenceEnd?: boolean; limitRoom?: string | null;
 }
@@ -39,10 +39,13 @@ export const ROUNDS: RoundDef[] = [
   { id: 'r8', title: 'Schemer', place: 'Ouderslaapkamer', light: 'avond', intro: 'Het wordt donker. Eén leeslamp.', objective: 'Vind haar in de schemer',
     player: { x: 5.6, z: -1.6, yaw: 0 }, mosquitoes: [{ room: 'ouder', resting: true, near: [8.4, 1.5, -3.2] }, { room: 'ouder' }], alert: 0.85, hostDrive: 0.4, rest: [5, 12], speed: 0.52,
     doors: { ouder: 1.5 } },
+  // r9/r10: the wc and kids-room-1 doors hinge 7 cm apart in one corner and both open into the living room: with kids room 1
+  // wide open (80 deg) the wc door can stand only ajar (<= 0.21 rad; both at 1.4 put the leaves through each other and
+  // locked both doors). Kids room 2 opens to 54 deg before the corner sofa (measured, world.measureMaxOpen).
   { id: 'r9', title: 'Nog één mug', place: 'Het hele chalet', light: 'nacht', intro: 'Eén laatste. Slim en schichtig.', objective: 'Nog één',
     player: { x: 4.3, z: -1.9, yaw: N }, mosquitoes: [{ room: 'woon' }], alert: 1.15, hostDrive: 0.5, rest: [6, 14], speed: 0.6,
-    doors: { kind1: 1.4, kind2: 1.4, ouder: 1.4, bad: 1.4, wc: 1.4 }, silenceEnd: true },
+    doors: { kind1: 1.4, kind2: 0.9, ouder: 1.4, bad: 1.4, wc: 0.2 }, silenceEnd: true },
   { id: 'r10', title: 'Rust in het chalet', place: 'Alle kamers', light: 'nacht', intro: 'Vijf muggen verspreid door het chalet.', objective: 'Maak het chalet muggenvrij',
     player: { x: 4.3, z: -1.9, yaw: N }, mosquitoes: [{ room: 'woon' }, { room: 'kind1' }, { room: 'kind2' }, { room: 'ouder' }, { room: 'bad', resting: true }],
-    alert: 1.0, hostDrive: 0.45, rest: [5, 14], speed: 0.56, doors: { kind1: 1.4, kind2: 1.4, ouder: 1.4, bad: 1.4, wc: 0.9 } },
+    alert: 1.0, hostDrive: 0.45, rest: [5, 14], speed: 0.56, doors: { kind1: 1.4, kind2: 0.9, ouder: 1.4, bad: 1.4, wc: 0.2 } },
 ];

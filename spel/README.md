@@ -10,7 +10,7 @@ npm run build     # tsc --noEmit && vite build -> dist/
 ```
 
 ## Structuur
-- `src/game/` — core (engine, camera, beweging, deuren), session (ronde-runtime), rounds (10 rondes), save.
+- `src/game/` — core (engine, camera, beweging, deuren), doors (deurbladen: onderlinge botsing, opzij duwen), session (ronde-runtime), rounds (10 rondes), save.
 - `src/engine/` — world (GLB, lichtkaarten, probes, hemel, deuren), lightmap (gebakken irradiantie-plugin), whitebalance.
 - `src/physics/` — driehoeks-BVH, spelerscapsule. `src/swatter/` — slag + continue botsing, hand/mouw/mepper-weergave.
 - `src/mosquito/` — gedrag en model. `src/audio/` — Web Audio. `public/audio/buzz-worklet.js` — zoemsynthese.
