@@ -17,6 +17,23 @@ const hit: RayHit = { t: 0, tri: 0, nx: 0, ny: 0, nz: 0 };
 /** Chance per swing that a resting mosquito notices it in time and darts off, times the round's alertness
  * (0.45-1.15): a well-aimed swat hits ~82 % in round 1 down to ~54 % in round 9 (game tuning, to confirm in play). */
 export const ESCAPE_PER_SWING = 0.4;
+/** Landing (user feedback 06-10-2026: "it suddenly sits somewhere else than where it was flying"). The approach flies to
+ * `approach` m off the chosen surface, at its cruising speed (at least `speed` m/s) and slowing down over the last 20 cm;
+ * within `reached` m of that point it settles onto the surface over `touchdown` s. A landing that does not get there in
+ * time (a door leaf in the way, a bounce) is given up and the mosquito flies on - it used to be put on the spot when the
+ * 2.5 s timer ran out, at 0.25 m/s up to ~1 m from where it was. */
+export const LANDING = { approach: 0.025, reached: 0.03, touchdown: 0.25, speed: 0.25 };
+/** Seconds a resting mosquito needs to turn from its flight pose into its resting pose, and back when it takes off. */
+export const TAKEOFF = 0.18;
+
+/** Tangent basis of a surface with normal n (the resting mosquito's heading is an angle in it; visual.ts draws with it). */
+export function surfaceBasis(nx: number, ny: number, nz: number): { t1: [number, number, number]; t2: [number, number, number] } {
+  // t1 = n x ref, t2 = t1 x n (ref = up, or x on floors and ceilings)
+  const [rx, ry, rz] = Math.abs(ny) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+  let ax = ny * rz - nz * ry, ay = nz * rx - nx * rz, az = nx * ry - ny * rx;
+  const al = Math.hypot(ax, ay, az) || 1; ax /= al; ay /= al; az /= al;
+  return { t1: [ax, ay, az], t2: [ay * nz - az * ny, az * nx - ax * nz, ax * ny - ay * nx] };
+}
 
 export class MosquitoBrain {
   // kinematics
@@ -32,8 +49,14 @@ export class MosquitoBrain {
   wingPhase = 0; flying = true;
   lastSeenThreat = 0;
   hostTimer = 0; bitten = false;
+  /** how far the body has turned from its flight pose into its resting pose on the surface (0 flying .. 1 resting): it
+   * settles while touching down and turns back while taking off, so the visual never jumps between the two */
+  settle = 0;
   /** the swing whose approach has been judged (escape or not); -1 = none */
   private judgedSwing = -1;
+  /** landing: the chosen surface point and, once the approach point is reached, the touchdown (time and start point) */
+  private sx = 0; private sy = 0; private sz = 0;
+  private td = -1; private fx = 0; private fy = 0; private fz = 0;
   id: number;
   events: string[] = [];
   constructor(public bvh: TriBVH, public p: MosquitoParams, id: number, public obstacleRay: (ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number) => number) {
@@ -43,12 +66,15 @@ export class MosquitoBrain {
   get audible() { return this.state === 'fly' || this.state === 'takeoff' || this.state === 'land' || this.state === 'evade'; }
   get alive() { return this.state !== 'dead' && this.state !== 'squashed' && this.state !== 'fall' && this.state !== 'gone'; }
 
-  placeResting(x: number, y: number, z: number, nx: number, ny: number, nz: number, tri: number, cls: number) {
+  /** Put the mosquito at rest on a surface point (x, y, z) with normal n. heading: its angle in the surface's tangent
+   * basis (surfaceBasis); a random one when not given (start positions). */
+  placeResting(x: number, y: number, z: number, nx: number, ny: number, nz: number, tri: number, cls: number, heading?: number) {
     this.x = x + nx * 0.003; this.y = y + ny * 0.003; this.z = z + nz * 0.003;
     this.nx = nx; this.ny = ny; this.nz = nz; this.tri = tri; this.surfaceClass = cls;
     this.vx = this.vy = this.vz = 0;
     this.setState('rest', rnd(this.p.restMin, this.p.restMax));
-    this.headAngle = rnd(0, Math.PI * 2);
+    this.headAngle = heading ?? rnd(0, Math.PI * 2);
+    this.settle = 1; this.td = -1;
   }
 
   setState(s: MState, timer = 0) { this.state = s; this.timer = timer; this.stateTime = 0; this.events.push(s); }
@@ -68,6 +94,8 @@ export class MosquitoBrain {
   update(dt: number, host: Host, threat: Threat, bounds: [number, number, number, number], hostSpeed: number) {
     this.stateTime += dt; this.timer -= dt;
     this.wingPhase += dt * 2 * Math.PI * (this.audible ? 520 : 0);
+    // turning out of the resting pose: over TAKEOFF s from the moment it leaves the surface
+    if (this.state !== 'rest' && this.state !== 'land' && this.settle > 0) this.settle = Math.max(0, this.settle - dt / TAKEOFF);
     switch (this.state) {
       case 'rest': this.rest(dt, host, threat, hostSpeed); break;
       case 'takeoff': case 'fly': case 'evade': case 'land': this.fly(dt, host, threat, bounds); break;
@@ -121,6 +149,13 @@ export class MosquitoBrain {
   }
 
   private fly(dt: number, host: Host, threat: Threat, bounds: [number, number, number, number]) {
+    if (this.state === 'land') {
+      // a swatter close by during the approach or the touchdown: it darts off, as in flight
+      if (threat.active && Math.hypot(threat.x - this.x, threat.y - this.y, threat.z - this.z) < 0.22 && Math.random() < dt * 25 * this.p.alert) { this.escape(threat); return; }
+      if (this.td >= 0) { this.touchdown(dt); return; }
+      // not there in time (bounced off something, a door leaf in the way): give the landing up and fly on
+      if (this.timer <= 0) { this.setState('fly', rnd(1, 3)); this.pickWanderTarget(host, bounds); }
+    }
     const st = this.state;
     if (st === 'takeoff' && this.timer <= 0) { this.setState('fly', rnd(4, 11)); this.pickWanderTarget(host, bounds); }
     if (st === 'evade' && this.timer <= 0) { this.setState('fly', rnd(3, 8)); this.pickWanderTarget(host, bounds); }
@@ -138,7 +173,7 @@ export class MosquitoBrain {
       if (dh < 0.35) { this.hostTimer += dt; if (this.hostTimer > rnd(2.5, 6) && Math.random() < this.p.hostDrive) { this.setState('onhost', rnd(1.6, 2.6)); this.hostTimer = 0; } }
     }
     // steering: desired velocity toward target with OU jitter
-    const maxV = st === 'evade' ? 2.2 : st === 'land' ? 0.25 : this.p.speed;
+    const maxV = st === 'evade' ? 2.2 : st === 'land' ? this.landSpeed : this.p.speed;
     let gx = this.tx - this.x, gy = this.ty - this.y, gz = this.tz - this.z;
     const gl = Math.hypot(gx, gy, gz) || 1;
     gx /= gl; gy /= gl; gz /= gl;
@@ -170,13 +205,37 @@ export class MosquitoBrain {
     const sp = Math.hypot(this.vx, this.vy, this.vz), vmax = maxV * 1.5;
     if (sp > vmax) { this.vx *= vmax / sp; this.vy *= vmax / sp; this.vz *= vmax / sp; }
     this.integrate(dt);
-    if (st === 'land') {
-      const dl = Math.hypot(this.tx - this.x, this.ty - this.y, this.tz - this.z);
-      if (dl < 0.02 || this.timer <= 0) {
-        // settle onto the chosen surface
-        this.placeResting(this.tx - this.nx * 0.025, this.ty - this.ny * 0.025, this.tz - this.nz * 0.025, this.nx, this.ny, this.nz, this.tri, this.surfaceClass);
-        this.events.push('landed');
-      }
+    // at the approach point: touch down from where it is (the resting pose turns in on the way)
+    if (st === 'land' && Math.hypot(this.tx - this.x, this.ty - this.y, this.tz - this.z) < LANDING.reached) {
+      this.td = 0; this.fx = this.x; this.fy = this.y; this.fz = this.z;
+      this.headAngle = this.landingHeading();
+    }
+  }
+
+  /** Heading on the surface: the way it was flying along it; flying straight at a wall, mostly head up (a little
+   * askew), on a ceiling or floor any way. */
+  private landingHeading(): number {
+    const { t1, t2 } = surfaceBasis(this.nx, this.ny, this.nz);
+    const vn = this.vx * this.nx + this.vy * this.ny + this.vz * this.nz;
+    const fx = this.vx - this.nx * vn, fy = this.vy - this.ny * vn, fz = this.vz - this.nz * vn;
+    const along = Math.hypot(fx, fy, fz), sp = Math.hypot(this.vx, this.vy, this.vz);
+    if (along > 0.02 && along > 0.3 * sp) return Math.atan2(fx * t2[0] + fy * t2[1] + fz * t2[2], fx * t1[0] + fy * t1[1] + fz * t1[2]);
+    if (Math.abs(this.ny) < 0.7) return Math.PI / 2 + rnd(-0.9, 0.9);       // t2 points up along a wall
+    return rnd(0, Math.PI * 2);
+  }
+
+  /** The last few cm onto the surface, eased, over LANDING.touchdown s; then it rests where it touched down. */
+  private touchdown(dt: number) {
+    this.td += dt;
+    const k = Math.min(1, this.td / LANDING.touchdown), e = k * k * (3 - 2 * k);
+    const rx = this.sx + this.nx * 0.003, ry = this.sy + this.ny * 0.003, rz = this.sz + this.nz * 0.003;
+    this.x = this.fx + (rx - this.fx) * e; this.y = this.fy + (ry - this.fy) * e; this.z = this.fz + (rz - this.fz) * e;
+    // the approach speed dies away (the buzz and the flight pose follow it)
+    this.vx *= Math.exp(-dt * 12); this.vy *= Math.exp(-dt * 12); this.vz *= Math.exp(-dt * 12);
+    this.settle = e;
+    if (k >= 1) {
+      this.placeResting(this.sx, this.sy, this.sz, this.nx, this.ny, this.nz, this.tri, this.surfaceClass, this.headAngle);
+      this.events.push('landed');
     }
   }
 
@@ -204,9 +263,9 @@ export class MosquitoBrain {
     return best;
   }
 
-  /** Find a real surface (wall/ceiling/curtain/furniture) nearby and fly to 2.5 cm off it. */
+  /** Find a real surface (wall/ceiling/curtain/furniture) nearby and fly to LANDING.approach m off it. */
   beginLanding(host: Host) {
-    let found = false;
+    let found = false, dist = 0;
     for (let i = 0; i < 14 && !found; i++) {
       let dx = gauss(), dy = gauss() * 0.7 + 0.15, dz = gauss();
       // prefer surfaces away from the host's head (unless host-driven)
@@ -216,15 +275,25 @@ export class MosquitoBrain {
         const kind = this.bvh.kind[hit.tri];
         if (hit.ny > 0.75 && kind === 1 && Math.random() < 0.85) continue;  // mostly avoid floors
         if (hit.t < 0.08) continue;
+        // not on or behind a door leaf: a leaf moves, and one in the way kept the mosquito from getting there
+        if (this.obstacleRay(this.x, this.y, this.z, dx, dy, dz, hit.t) < hit.t) continue;
         const px = this.x + dx * hit.t, py = this.y + dy * hit.t, pz = this.z + dz * hit.t;
         if (py < 0.25 || py > 2.35) continue;
         this.nx = hit.nx; this.ny = hit.ny; this.nz = hit.nz; this.tri = hit.tri; this.surfaceClass = this.bvh.cls[hit.tri];
-        this.tx = px + hit.nx * 0.025; this.ty = py + hit.ny * 0.025; this.tz = pz + hit.nz * 0.025;
+        this.sx = px; this.sy = py; this.sz = pz;
+        const a = LANDING.approach;
+        this.tx = px + hit.nx * a; this.ty = py + hit.ny * a; this.tz = pz + hit.nz * a;
+        dist = hit.t;
         found = true;
       }
     }
-    if (found) this.setState('land', 2.5); else this.setState('fly', rnd(1, 3));
+    // time for the approach (it slows down over the last 20 cm), with room for a detour
+    this.td = -1;
+    if (found) this.setState('land', 2 + dist / (0.5 * this.landSpeed)); else this.setState('fly', rnd(1, 3));
   }
+
+  /** approach speed: its cruising speed, at least LANDING.speed */
+  private get landSpeed() { return Math.max(LANDING.speed, this.p.speed); }
 
   private onHost(dt: number, host: Host, threat: Threat) {
     // sits on the player's hand/neck area: follows the host; bites when the timer ends

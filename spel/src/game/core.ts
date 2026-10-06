@@ -6,7 +6,7 @@ import { Vector3 } from '@babylonjs/core/Maths/math.vector';
 import { Color4 } from '@babylonjs/core/Maths/math.color';
 import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration';
 import { loadWorld, roomAt, type World, type Door } from '../engine/world';
-import { PlayerBody, PLAYER, CLIMB } from '../physics/player';
+import { PlayerBody, PLAYER, CLIMB, POSTURE } from '../physics/player';
 import { Input } from '../input/input';
 import { Metrics } from '../diag/metrics';
 import { leafSegment, swingTo, stepLeaf, LATCHED, type Seg } from './doors';
@@ -30,10 +30,12 @@ export class Core {
   engine: Engine; scene: Scene; camera: FreeCamera; world!: World; player!: PlayerBody; input: Input; metrics = new Metrics();
   yaw = Math.PI * 0.5; pitch = 0; running = false; time = 0;
   bob = 0; room = 'woon';
+  /** posture (POSTURE), eased toward the one the player sets (input.state.stance) */
+  stance = 0;
   private listeners: ((dt: number) => void)[] = [];
   private quality: QualityTier = QUALITY.normaal;
 
-  constructor(public canvas: HTMLCanvasElement, hudRoot: HTMLElement, swatBtn: HTMLElement, doorBtn: HTMLElement) {
+  constructor(public canvas: HTMLCanvasElement, hudRoot: HTMLElement, swatBtn: HTMLElement, doorBtn: HTMLElement, stanceEl?: HTMLElement | null) {
     // context loss is handled by the page (main.ts: pause, reload, offer the round again): Babylon's own restore left a
     // blank view (HDR probes, raw textures; REVIEW-01 G-04) and keeps CPU copies of all buffers for it
     this.engine = new Engine(canvas, true, { stencil: false, preserveDrawingBuffer: false, powerPreference: 'high-performance', antialias: true, adaptToDeviceRatio: false, doNotHandleContextLost: true }, false);
@@ -49,7 +51,7 @@ export class Core {
     this.camera = new FreeCamera('eye', new Vector3(4.3, 1.62, -1.5), this.scene);
     this.camera.minZ = 0.03; this.camera.maxZ = 150; this.camera.fov = FOV_H; this.camera.inputs.clear();
     this.camera.fovMode = FreeCamera.FOVMODE_HORIZONTAL_FIXED;
-    this.input = new Input(hudRoot, swatBtn, doorBtn);
+    this.input = new Input(hudRoot, swatBtn, doorBtn, stanceEl);
     window.addEventListener('resize', () => this.engine.resize());
     this.setQuality('normaal');
   }
@@ -78,6 +80,7 @@ export class Core {
     else { this.player.x = x; this.player.z = z; const f = this.player.floorAt(x, z, 1.0, 2); this.player.y = f > -Infinity ? f : 0; }
     this.player.vx = this.player.vz = this.player.vy = 0;
     this.yaw = yaw; this.pitch = pitch;
+    this.stance = 0; this.input.setStance(0);
     this.updateCamera();
   }
 
@@ -121,17 +124,26 @@ export class Core {
     this.pitch -= inp.lookDY * s * (this.input.opts.invertY ? -1 : 1);
     this.pitch = Math.max(-1.35, Math.min(1.35, this.pitch));
     inp.lookDX = inp.lookDY = 0;
-    // move in view space
+    // posture: held keys move it; the eye follows eased
+    const ks = this.input.keyStance();
+    if (ks) this.input.setStance(inp.stance + ks * POSTURE.keyRate * dt);
+    this.stance += (inp.stance - this.stance) * (1 - Math.exp(-dt / POSTURE.tau));
+    // move in view space (slower crouched or on the toes)
     const [kx, ky] = this.input.keyMove();
     let mx = inp.moveX + kx, my = inp.moveY + ky;
     const ml = Math.hypot(mx, my); if (ml > 1) { mx /= ml; my /= ml; }
     const fx = Math.cos(this.yaw), fz = -Math.sin(this.yaw);    // forward on ground (yaw 0 = +x east)
     const rx = Math.sin(this.yaw), rz = Math.cos(this.yaw);     // right
-    const wantX = (fx * my + rx * mx) * PLAYER.speed, wantZ = (fz * my + rz * mx) * PLAYER.speed;
-    this.player.updateClimb(dt, wantX, wantZ, this.pitch > 0.45);     // bed/chair/sofa: look up, or walk on into it
+    const speed = PLAYER.speed * (1 - (1 - POSTURE.lowSpeed) * Math.max(0, -this.stance) - (1 - POSTURE.toesSpeed) * Math.max(0, this.stance));
+    const wantX = (fx * my + rx * mx) * speed, wantZ = (fz * my + rz * mx) * speed;
+    // bed/chair/sofa: look up or stand up on the toes and walk into it, or walk on into a bed
+    this.player.updateClimb(dt, wantX, wantZ, this.pitch > 0.45 || this.stance > POSTURE.climb);
     this.player.step(dt, wantX, wantZ);
     this.pushDoors(dt, wantX, wantZ);
     this.updateDoors(dt);
+    // curtains: the body brushing past moves them; they swing on
+    this.world.curtains.brush({ x: this.player.x, y: this.player.y, z: this.player.z }, { x: this.player.vx, y: 0, z: this.player.vz }, PLAYER.radius, dt);
+    this.world.curtains.update(dt);
     // camera with subtle head bob proportional to speed (comfort option can disable)
     const sp = Math.hypot(this.player.vx, this.player.vz);
     this.bob += dt * sp * 5.6;

@@ -25,6 +25,13 @@ const COLLIDERS = collidersFor(PLAYER.stepUp);
 export const CLIMB = { maxAboveFloor: 0.70, pushTime: 0.3, hold: 0.8, headClear: 0.13, bedMin: 0.48 };
 const CLIMB_COLLIDERS = collidersFor(CLIMB.maxAboveFloor);
 
+/** The player's own posture (user request 06-10-2026: "bring the camera point of view down and up", so that a mosquito
+ * low behind furniture or high above it can be reached). stance -1 .. 1: down to `low` m lower (squatting, then on hands
+ * and knees: the eye ~0.7 m above the floor), up onto the toes (TIPTOE, swatter/armgeom.ts); from `climb` on, walking
+ * into a bed, chair or sofa steps onto it. Moving low or on the toes is slower. `minEye`: the eye never comes lower
+ * than this above the feet, whatever a swing adds. */
+export const POSTURE = { low: 0.92, minEye: 0.62, climb: 0.5, lowSpeed: 0.35, toesSpeed: 0.8, tau: 0.2, keyRate: 1.1 };
+
 const tmp = new Float32Array(3);
 
 export class PlayerBody {

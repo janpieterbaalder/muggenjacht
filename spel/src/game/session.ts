@@ -1,6 +1,7 @@
 // Round runtime: mosquitoes (brain + visual + voice), swatter swing & contacts, doors, hints, bites,
 // eye adaptation between rooms and outdoors, completion and saving.
 import type { Core } from './core';
+import { PLAYER, POSTURE } from '../physics/player';
 import type { AudioEngine } from '../audio/audio';
 import { SURFACE_CLASSES, type Surface } from '../audio/audio';
 import type { Save } from './save';
@@ -57,6 +58,8 @@ export function exposureFor(L: number): number {
 }
 
 const SOFT: Surface[] = ['fabric', 'leaves', 'plant', 'grass'];
+/** A resting mosquito whose curtain moves more than this (m) under it flies off. */
+const CURTAIN_STARTLE = 0.01;
 /** Room of a mosquito. A resting one counts by the air side of its surface: a window pane lies a few cm outside the
  * room boxes, and a mosquito sitting on the inside of the glass was announced as buzzing 'buiten' (REVIEW-01 G-09). */
 export function mosquitoRoom(b: { state: string; x: number; z: number; nx: number; nz: number }): string {
@@ -94,6 +97,7 @@ export class Session {
   private lastPracticeRoom = '';
   private armLoaded: Promise<void>;
   private threat: Threat = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, active: false };
+  private offTmp = { x: 0, y: 0, z: 0 };
 
   constructor(public core: Core, public audio: AudioEngine, public save: Save, public ui: SessionUI) {
     this.swing = new SwingSystem(core.world.bvh, (o, d, max) => this.doorRay(o.x, o.y, o.z, d.x, d.y, d.z, max));
@@ -309,9 +313,14 @@ export class Session {
   }
 
   private targets(): MosquitoTarget[] {
+    const kind = this.core.world.bvh.kind;
     return this.mosq.map((m, i) => ({ idx: i, pos: { x: m.brain.x, y: m.brain.y, z: m.brain.z }, prev: m.prev, alive: m.brain.alive,
-      resting: m.brain.state === 'rest', nrm: { x: m.brain.nx, y: m.brain.ny, z: m.brain.nz } }));
+      resting: m.brain.state === 'rest', nrm: { x: m.brain.nx, y: m.brain.ny, z: m.brain.nz },
+      soft: m.brain.state === 'rest' && m.brain.tri >= 0 && kind[m.brain.tri] === 3 }));
   }
+
+  /** How far (m) the player's own posture lowers the body (Core.stance below standing). */
+  private manualDrop() { return Math.max(0, -this.core.stance) * POSTURE.low; }
 
   private update(dt: number) {
     if (!this.active || this.paused) return;
@@ -349,7 +358,8 @@ export class Session {
         };
         if (!clear(crouch)) for (const extra of [0.15, 0.3, 0.45]) if (clear(crouch + extra)) { crouch += extra; break; }
         // a negative crouch is a rise onto the toes, on top of what looking up already gives
-        this.crouchTarget = Math.min(0.6, Math.max(0, crouch));
+        // (bent down already, the knees bend only as far as the lowest posture allows)
+        this.crouchTarget = Math.min(0.6, Math.max(0, crouch), Math.max(0, PLAYER.eye - POSTURE.minEye - this.manualDrop()));
         this.toesTarget = Math.min(TIPTOE, this.tiptoe + Math.max(0, -crouch));
       }
     }
@@ -380,7 +390,15 @@ export class Session {
           this.bites++; this.ui.onBites(this.bites); this.ui.onToast('Au — gestoken.', 1600); this.audio.bite(); core.metrics.event('bite', { id: m.brain.id });
         } else if (ev === 'landed') core.metrics.event('landed', { id: m.brain.id, cls: SURFACE_CLASSES[m.brain.surfaceClass] });
       }
-      m.vis.sync(m.brain, this.t, cf.eye);
+      // on a curtain that moves the mosquito goes along with the fabric (a squashed one stays on it); one that rests on
+      // it flies off once the fabric really moves under it
+      const b = m.brain;
+      let off: { x: number; y: number; z: number } | undefined;
+      if ((b.state === 'rest' || b.state === 'squashed') && b.tri >= 0 && core.world.bvh.kind[b.tri] === 3) {
+        off = core.world.curtains.displacementAt(b, this.offTmp) ?? undefined;
+        if (off && b.state === 'rest' && Math.hypot(off.x, off.y, off.z) > CURTAIN_STARTLE) b.takeoff();
+      }
+      m.vis.sync(b, this.t, cf.eye, off);
     }
     // --- swing physics & contacts (same time step as the mosquito motion)
     // lean follows the swing: in (or back) during wind-up/strike, hold briefly after contact, then straighten up
@@ -393,12 +411,15 @@ export class Session {
     const lookCrouch = Math.max(0, Math.min(1, (-core.pitch - 1.0) / 0.3)) * 0.35;
     const crouchGoal = Math.max(inSwing ? this.crouchTarget : 0, lookCrouch);
     this.crouch += (crouchGoal - this.crouch) * (1 - Math.exp(-dt / (crouchGoal > this.crouch ? 0.09 : 0.25)));
-    // toes: looking up (a mosquito on the ceiling) raises the view as standing on tiptoe does; a high swing may rise
-    // the rest of the way
-    const toesGoal = Math.max(lookTiptoe(core.pitch), inSwing ? this.toesTarget : 0);
+    // toes: looking up (a mosquito on the ceiling) raises the view as standing on tiptoe does (standing, not bent down);
+    // the player's own posture can put you on the toes too; a high swing may rise the rest of the way
+    const low = this.manualDrop(), standing = Math.max(0, 1 - low / 0.1);
+    const toesGoal = Math.max(lookTiptoe(core.pitch) * standing, Math.max(0, core.stance) * TIPTOE, inSwing ? this.toesTarget : 0);
     this.tiptoe += (toesGoal - this.tiptoe) * (1 - Math.exp(-dt / (toesGoal > this.tiptoe ? 0.12 : 0.25)));
-    // (leaning in lowers the eye; a step back does not)
-    core.lean.f = this.lean; core.lean.d = Math.max(0, this.lean) * 0.35 + this.crouch - this.tiptoe;
+    // (leaning in lowers the eye; a step back does not); the player's posture lowers it as far as it is set, the eye never
+    // below POSTURE.minEye above the feet
+    core.lean.f = this.lean;
+    core.lean.d = Math.min(Math.max(0, this.lean) * 0.35 + low + this.crouch, PLAYER.eye - POSTURE.minEye) - this.tiptoe;
     const rest = this.swing.restFor(cf, hand, this.t);
     const contact = this.swing.update(dt, rest, this.targets(), cf, hand);
     const s = this.swing.swing;
@@ -407,7 +428,7 @@ export class Session {
       this.audio.whoosh(Math.hypot(v.x, v.y, v.z), p.x, p.y, p.z); this.whooshed = true;
     }
     if (contact) this.onContact(contact);
-    this.arm.sync(this.swing.pose ?? rest, cf, hand);
+    this.arm.sync(this.swing.pose ?? rest, cf, hand, cf.eye.y - core.player.y);
     // --- incoming mosquitoes through the open terrace door (round 4)
     const inc = this.round.incoming;
     if (inc && this.incomingLeft > 0) {
@@ -521,6 +542,8 @@ export class Session {
     }
     if (!c.air) this.audio.swat(surf || (m ? SURFACE_CLASSES[m.brain.surfaceClass] ?? 'panel' : 'panel'), c.speed, c.point.x, c.point.y, c.point.z, killed);
     else if (killed) this.audio.swat('plastic', c.speed * 0.25, c.point.x, c.point.y, c.point.z, true);   // light tick of the mesh on the body in air
+    // a curtain gives way where it is slapped (also when the slap lands on a mosquito sitting on it)
+    if (!c.air && (c.kind === 3 || c.mosquito >= 0)) this.core.world.curtains.hit(c.point, { x: -c.normal.x * c.speed, y: -c.normal.y * c.speed, z: -c.normal.z * c.speed });
     // impact vibration / air pressure may disturb other resting mosquitoes nearby
     for (const o of this.mosq) {
       if (o === m || o.brain.state !== 'rest') continue;

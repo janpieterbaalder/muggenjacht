@@ -1,31 +1,68 @@
 // Touch (landscape, two thumbs) + mouse/keyboard input. No allocation per event in hot paths.
+import { trackToStance } from './stance';
+
 export interface InputState {
   moveX: number; moveY: number;          // -1..1 (x right, y forward)
   lookDX: number; lookDY: number;        // accumulated pixels since last frame
   swatQueued: boolean;                   // swing request
   swatScreen: { x: number; y: number } | null; // aim point in CSS px (null = crosshair)
   interactQueued: boolean;
+  /** posture the player sets: -1 low .. 0 standing .. 1 on the toes (core.ts POSTURE); it stays where it is set */
+  stance: number;
   keys: Set<string>;
 }
 
 export interface InputOptions { leftHanded: boolean; lookSensitivity: number; invertY: boolean; }
 
 export class Input {
-  state: InputState = { moveX: 0, moveY: 0, lookDX: 0, lookDY: 0, swatQueued: false, swatScreen: null, interactQueued: false, keys: new Set() };
+  state: InputState = { moveX: 0, moveY: 0, lookDX: 0, lookDY: 0, swatQueued: false, swatScreen: null, interactQueued: false, stance: 0, keys: new Set() };
   opts: InputOptions = { leftHanded: false, lookSensitivity: 1, invertY: false };
   enabled = false;
   private stickId: number | null = null; private stickOx = 0; private stickOy = 0;
   private lookId: number | null = null; private lookX = 0; private lookY = 0; private lookStartX = 0; private lookStartY = 0; private lookStartT = 0; private lookMoved = 0;
   private mouseDown = false; private mouseX = 0; private mouseY = 0; private mouseMoved = 0; private mouseT = 0;
+  private stanceId: number | null = null;
   onStick?: (active: boolean, ox: number, oy: number, dx: number, dy: number) => void;
+  /** the posture changed (slider, keys, wheel): for the slider's knob */
+  onStance?: (stance: number) => void;
 
-  constructor(private el: HTMLElement, private swatBtn: HTMLElement, private doorBtn: HTMLElement) {
+  constructor(private el: HTMLElement, private swatBtn: HTMLElement, private doorBtn: HTMLElement, private stanceEl?: HTMLElement | null) {
     el.addEventListener('pointerdown', this.down, { passive: false });
     el.addEventListener('pointermove', this.move, { passive: false });
     el.addEventListener('pointerup', this.up, { passive: false });
     el.addEventListener('pointercancel', this.up, { passive: false });
+    // mouse wheel / touchpad: the posture (scrolling down goes down)
+    el.addEventListener('wheel', (e) => {
+      if (!this.enabled) return;
+      e.preventDefault();
+      const dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+      this.setStance(this.state.stance - Math.max(-0.25, Math.min(0.25, dy / 400)));
+    }, { passive: false });
     swatBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); if (this.enabled) { this.state.swatQueued = true; this.state.swatScreen = null; } });
     doorBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); if (this.enabled) this.state.interactQueued = true; });
+    if (stanceEl) {
+      // the slider: drag (or tap) to a posture; it stays there. Its events never reach the look/move handlers.
+      const at = (e: PointerEvent) => {
+        const r = stanceEl.getBoundingClientRect(), pad = r.width / 2;
+        this.setStance(trackToStance((e.clientY - r.top - pad) / Math.max(1, r.height - 2 * pad)));
+      };
+      stanceEl.addEventListener('pointerdown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (!this.enabled || this.stanceId !== null) return;
+        this.stanceId = e.pointerId;
+        try { stanceEl.setPointerCapture(e.pointerId); } catch { /* synthetic pointers */ }
+        at(e);
+      });
+      stanceEl.addEventListener('pointermove', (e) => { e.stopPropagation(); if (e.pointerId === this.stanceId) { e.preventDefault(); at(e); } });
+      const end = (e: PointerEvent) => {
+        e.stopPropagation();
+        if (e.pointerId !== this.stanceId) return;
+        this.stanceId = null;
+        // let go near the mark: standing
+        if (Math.abs(this.state.stance) < 0.12) this.setStance(0);
+      };
+      stanceEl.addEventListener('pointerup', end); stanceEl.addEventListener('pointercancel', end);
+    }
     window.addEventListener('keydown', (e) => {
       if (!this.enabled) return;
       const k = e.code;
@@ -38,8 +75,16 @@ export class Input {
     window.addEventListener('blur', () => this.reset());
   }
 
+  /** Set the posture (clamped to -1..1). */
+  setStance(s: number) {
+    const v = Math.max(-1, Math.min(1, s));
+    if (v === this.state.stance) return;
+    this.state.stance = v;
+    this.onStance?.(v);
+  }
+
   reset() {
-    this.stickId = this.lookId = null; this.mouseDown = false;
+    this.stickId = this.lookId = this.stanceId = null; this.mouseDown = false;
     this.state.moveX = this.state.moveY = this.state.lookDX = this.state.lookDY = 0;
     this.state.swatQueued = false; this.state.swatScreen = null; this.state.interactQueued = false; this.state.keys.clear();
     this.onStick?.(false, 0, 0, 0, 0);
@@ -111,5 +156,11 @@ export class Input {
     const x = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
     const y = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
     return [x, y];
+  }
+
+  /** Keyboard posture: Q up, Z (or C) down while held (+1 / -1 / 0). */
+  keyStance(): number {
+    const k = this.state.keys;
+    return (k.has('KeyQ') ? 1 : 0) - (k.has('KeyZ') || k.has('KeyC') ? 1 : 0);
   }
 }

@@ -20,6 +20,13 @@ export const SWATTER = { headW: 0.105, headH: 0.125, headT: 0.004, neck: 0.02, s
 // from the eye: arm ~0.62 + swatter ~0.4 when upright (0.98); leaning the upper body in (Session.lean) adds ~0.3
 export const REACH = { max: 1.28, upright: 0.98, min: 0.18 };
 export const MOSQ_R = 0.011;                          // body/leg envelope + small fairness margin
+/** How far (m) the head may be laid beside the aimed point so that it lies flat next to a wall, in a corner or against
+ * a frame (headRoom): no more than its half width (plus the margin the hit test gives), so the mosquito there stays
+ * under it whichever way the head is turned. */
+export const HEAD_SHIFT = 0.055;
+/** A slap on fabric (curtain folds, bedding) presses it in: a mosquito sitting up to this far (m) behind the face where
+ * it meets the fabric - in the fold between two others - is still hit (it used to be out of reach behind the folds). */
+export const FABRIC_GIVE = 0.13;
 
 /** Head/handle pose. n = striking face normal (points at target), u = neck->grip direction in the head plane, r = u x n.
  * flex = bend of the head against the handle at the neck, about r (rad; + = handle tilted back toward the player, as
@@ -214,7 +221,9 @@ export type SwingPhase = 'idle' | 'windup' | 'strike' | 'rebound' | 'follow' | '
 
 export interface ContactInfo { t: number; point: V3; normal: V3; cls: number; kind: number; speed: number; mosquito: number; air: boolean; door: boolean; }
 
-export interface MosquitoTarget { idx: number; pos: V3; prev: V3; alive: boolean; resting: boolean; nrm: V3; }
+export interface MosquitoTarget { idx: number; pos: V3; prev: V3; alive: boolean; resting: boolean; nrm: V3;
+  /** resting on fabric that gives way under a slap (curtain, bedding) */
+  soft?: boolean; }
 
 export interface Swing {
   phase: SwingPhase; t: number; tContact: number; tEnd: number;
@@ -281,7 +290,8 @@ export class SwingSystem {
     // aim 12 mm beyond a surface: the continuous sweep then always registers the contact AT the surface
     // (planning to stop just short of it made contact depend on a floating-point tie). Beyond it along its normal, the
     // way the head comes in: 12 mm on along an oblique aim put the head's centre up to 2.3 cm beside the aimed point.
-    let P = surface ? add(add(c.eye, d, dist), n, 0.012) : add(c.eye, d, dist);
+    // Next to a wall, in a corner or against a frame the head is laid beside the aimed point, edge to that face.
+    let P = surface ? add(add(add(c.eye, d, dist), this.headRoom(add(c.eye, d, dist), nrm)), n, 0.012) : add(c.eye, d, dist);
     // the swatter is held so that it fits where it goes: hand, handle and head clear of walls and furniture at the target
     // and on the way there (a pose with the hand in a side wall was pushed out as a whole: the head landed up to 7 cm
     // beside the mosquito it killed, at the back wall of the toilet)
@@ -309,6 +319,44 @@ export class SwingSystem {
     this.swing = s;
     this.swings++;
     return true;
+  }
+
+  /** Where the head can lie flat on a surface at S (nOut: the surface's normal toward the free side). Next to a wall, in
+   * a corner, at a window frame or where the ceiling meets the wall the rim of a head centred on S meets that face
+   * before its own face reaches the surface: the swing stopped there and a mosquito close to the edge was out of reach.
+   * The head is moved along the surface away from what stands up from it within its half width - as one lays a swatter
+   * with its edge in the corner - by at most HEAD_SHIFT. Returns that offset; zero where nothing is in the way or where
+   * the head does not fit at all (a gap narrower than the head). */
+  headRoom(S: V3, nOut: V3): V3 {
+    // (a disc of the head's long half side: it fits turned either way; turned askew its corners reach further, and the
+    // strike planner turns it square to the wall)
+    const R = SWATTER.headH / 2 + 0.004;
+    const e1 = norm(cross(nOut, Math.abs(nOut.y) < 0.9 ? v(0, 1, 0) : v(1, 0, 0))), e2 = cross(nOut, e1);
+    /** the deepest intrusion into the head's disc around S + off, at its face (6 mm off the surface: a frame's lip)
+     * and higher up (a wall), and the direction it comes from */
+    const intrusion = (off: V3) => {
+      let worst = 0, from = v();
+      for (const h of [0.006, 0.02]) {
+        const o = add(add(S, off), nOut, h);
+        for (let k = 0; k < 16; k++) {
+          const a = k * Math.PI / 8, dir = add(v(e1.x * Math.cos(a), e1.y * Math.cos(a), e1.z * Math.cos(a)), e2, Math.sin(a));
+          let t = this.bvh.raycast(o.x, o.y, o.z, dir.x, dir.y, dir.z, R, hit, 15) ? hit.t : R;
+          t = Math.min(t, this.doorRay(o, dir, R));
+          if (R - t > worst) { worst = R - t; from = dir; }
+        }
+      }
+      return { worst, from };
+    };
+    let off = v();
+    for (let it = 0; it < 5; it++) {
+      const { worst, from } = intrusion(off);
+      if (worst < 0.002) return off;
+      off = add(off, from, -(worst + 0.001));
+      const l = len(off);
+      if (l > HEAD_SHIFT) off = v(off.x * HEAD_SHIFT / l, off.y * HEAD_SHIFT / l, off.z * HEAD_SHIFT / l);
+    }
+    // still in the way (right in the corner, or a gap narrower than the head): only as far as it helps
+    return intrusion(off).worst < intrusion(v()).worst - 0.005 ? off : v();
   }
 
   /** The swing for a planned contact pose: approach to in front of the target, strike, recovery. */
@@ -773,12 +821,13 @@ export class SwingSystem {
       }
     }
     if (bestInfo && bestInfo.mosquito < 0 && !bestInfo.air) {
-      // world contact: squash resting mosquitoes under the head footprint at contact
-      const pc = blend(p0, p1, best);
+      // world contact: squash resting mosquitoes under the head footprint at contact (on fabric also one in the fold
+      // behind: the fabric gives way under the slap)
+      const pc = blend(p0, p1, best), give = bestInfo.kind === 3 ? FABRIC_GIVE : 0.03;
       for (const m of mosq) {
         if (!m.alive || !m.resting) continue;
-        const rel = sub(m.pos, pc.h);
-        if (Math.abs(dot(rel, pc.n)) > 0.03) continue;
+        const rel = sub(m.pos, pc.h), along = dot(rel, pc.n);
+        if (along < -0.03 || along > (m.soft ? give : 0.03)) continue;
         const a = dot(rel, pc.r), b = -dot(rel, pc.u);
         if (Math.abs(a) <= W + MOSQ_R * 0.5 && Math.abs(b) <= Hh + MOSQ_R * 0.5) { bestInfo.mosquito = m.idx; break; }
       }
