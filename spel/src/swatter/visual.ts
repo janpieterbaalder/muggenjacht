@@ -46,6 +46,8 @@ export class ArmVisual {
   /** the wire handle, rebuilt every frame so it can bend (swing.wirePoint) */
   private wire!: Mesh;
   private wireBuf!: { positions: Float32Array; normals: Float32Array };
+  /** the torso as built (standing) and how far its belly is shortened now (1 = standing) */
+  private torsoRest!: Float32Array; private torsoK = 1;
 
   async load(scene: Scene) {
     const res = await ImportMeshAsync(import.meta.env.BASE_URL + 'assets/arm.glb', scene);
@@ -105,9 +107,11 @@ export class ArmVisual {
     for (const m of this.meshes) { const mat = m.material as PBRMaterial | null; if (mat instanceof PBRMaterial) mat.reflectionTexture = tex; }
   }
 
-  /** Place swatter/hand from the physical pose; forearm/upper arm by two-bone IK from the shoulder. */
-  sync(p: Pose, c: CamFrame, hand: number) {
+  /** Place swatter/hand from the physical pose; forearm/upper arm by two-bone IK from the shoulder. bodyHeight: the eye
+   * above the feet (m): bent down low, the torso is shorter (its belly would reach through the floor). */
+  sync(p: Pose, c: CamFrame, hand: number, bodyHeight = 1.62) {
     if (!this.ready) return;
+    this.fitTorso(bodyHeight);
     const r = V(p.r), n = V(p.n), u = V(p.u);
     // model frame (glTF Y-up of Blender swatter frame): X -> r, Y (Blender Z, face normal) -> n, Z (-Blender Y) -> -u
     const q = basisToQuat(r, n, u.scale(-1));
@@ -175,10 +179,23 @@ export class ArmVisual {
     const to = new Mesh('romp', scene);
     const vt = new VertexData();
     vt.positions = tb.positions; vt.normals = tb.normals; vt.uvs = tb.uvs; vt.indices = tb.indices;
-    vt.applyToMesh(to, false);
+    vt.applyToMesh(to, true);
+    this.torsoRest = Float32Array.from(tb.positions);
     to.material = m; to.alwaysSelectAsActiveMesh = true; to.isPickable = false;
     this.sleeve = sl; this.torso = to;
     this.meshes.push(sl, to);
+  }
+
+  /** Squatting or on hands and knees the body below the chest folds up: the torso's belly (below CHEST m under the eye)
+   * is shortened so that it ends 8 cm above the floor; the chest and shoulders keep their shape (the arm hangs there). */
+  private fitTorso(bodyHeight: number) {
+    const CHEST = 0.32, FULL = 1.0;
+    const k = Math.min(1, Math.max(0.15, (bodyHeight - 0.08 - CHEST) / (FULL - CHEST)));
+    if (Math.abs(k - this.torsoK) < 0.01 && (k < 1 || this.torsoK === 1)) return;
+    this.torsoK = k;
+    const P = Float32Array.from(this.torsoRest);
+    for (let i = 1; i < P.length; i += 3) if (P[i] < -CHEST) P[i] = -CHEST + (P[i] + CHEST) * k;
+    this.torso.updateVerticesData(VertexBuffer.PositionKind, P);
   }
 
   /** Wire handle: a thin tube along swing.wirePoint (rib end -> grip), then straight on into the fist. */

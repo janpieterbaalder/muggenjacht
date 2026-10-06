@@ -34,6 +34,16 @@ button { cursor: pointer; touch-action: manipulation; }
 #swat { position: absolute; right: calc(var(--safe-r) + 8px); bottom: calc(var(--safe-b) + 8px); width: 84px; height: 84px; border-radius: 50%;
   border: 1px solid rgba(239, 220, 174, .9); background: rgba(239, 220, 174, .82); color: var(--accent-ink); font-weight: 700; font-size: 17px; box-shadow: 0 4px 22px rgba(0, 0, 0, .28); }
 #hud.left #swat { right: auto; left: calc(var(--safe-l) + 8px); }
+/* posture slider above the 'Sla' button: the toes at the top (above the mark), low the rest; --f = knob 0 top .. 1 bottom */
+#stance { --f: .25; position: absolute; right: calc(var(--safe-r) + 28px); bottom: calc(var(--safe-b) + 108px); width: 44px; height: min(176px, 40vh);
+  border-radius: 22px; touch-action: none; pointer-events: auto; cursor: ns-resize;
+  background: linear-gradient(to bottom, rgba(239, 220, 174, .28) 0 calc(22px + .25 * (100% - 44px)), rgba(20, 30, 25, .22) calc(22px + .25 * (100% - 44px)) 100%); border: 1px solid var(--line); }
+#stance .tick { position: absolute; left: 9px; right: 9px; top: calc(22px + .25 * (100% - 44px) - 1px); height: 2px; border-radius: 1px; background: rgba(255, 255, 255, .55); pointer-events: none; }
+#stance .knob { position: absolute; left: 7px; width: 30px; height: 30px; border-radius: 50%; top: calc(22px + var(--f) * (100% - 44px) - 15px);
+  background: rgba(239, 220, 174, .85); box-shadow: 0 2px 10px rgba(0, 0, 0, .3); pointer-events: none; transition: background .2s; }
+#stance.low .knob { background: rgba(170, 205, 235, .9); }
+#stance.up .knob { background: rgba(250, 236, 196, .95); }
+#hud.left #stance { right: auto; left: calc(var(--safe-l) + 28px); }
 .ctx { position: absolute; right: calc(var(--safe-r) + 106px); bottom: calc(var(--safe-b) + 26px); height: 48px; min-width: 76px; border-radius: 24px; border: 1px solid var(--line);
   background: var(--panel); backdrop-filter: blur(8px); font-size: 14px; }
 #hud.left .ctx { right: auto; left: calc(var(--safe-l) + 106px); }
@@ -64,4 +74,5 @@ h2 { font: 600 24px Georgia, serif; margin: 6px 0 12px; }
 #roundlist button { text-align: left; min-height: 64px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, .05); padding: 8px 12px; font-size: 13px; }
 #roundlist button[disabled] { opacity: .35; }
 #roundlist b { display: block; font-size: 14px; margin-bottom: 2px; }
-@media (max-height: 460px) { .card { padding: 8px 14px; } h1 { font-size: 38px; margin: 4px 0 6px; } .lede { margin-bottom: 6px; } #swat { width: 74px; height: 74px; } .grid label { min-height: 34px; } }
+@media (max-height: 460px) { .card { padding: 8px 14px; } h1 { font-size: 38px; margin: 4px 0 6px; } .lede { margin-bottom: 6px; } #swat { width: 74px; height: 74px; } .grid label { min-height: 34px; }
+  #stance { right: calc(var(--safe-r) + 23px); bottom: calc(var(--safe-b) + 96px); } #hud.left #stance { left: calc(var(--safe-l) + 23px); } }

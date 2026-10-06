@@ -22,6 +22,7 @@ import { setImageProcessingQuiet } from './imageprocessing';
 import { readCollision, TriBVH, type CollisionData } from '../physics/bvh';
 import type { Obstacle2D } from '../physics/player';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer';
+import { Curtains } from './curtains';
 
 export type LightState = 'dag' | 'avond' | 'nacht';
 export const ROOM_BOXES: Record<string, [number, number, number, number]> = {
@@ -85,6 +86,8 @@ export interface LightMeta {
 
 export interface World {
   bvh: TriBVH; doors: Door[]; statics: AbstractMesh[]; dynamics: AbstractMesh[];
+  /** the curtains: they give way when slapped or brushed (cloth.ts) */
+  curtains: Curtains;
   lightmaps: Record<string, Texture>; probes: Record<string, HDRCubeTexture>; meta: LightMeta;
   /** requested light state and the state actually shown (missing bakes fall back to 'dag', reported in info) */
   state: LightState; shownState: LightState;
@@ -269,12 +272,13 @@ export async function loadWorld(scene: Scene, onProgress: (f: number, label: str
     doors.push(door);
     void ex;
   }
+  const curtains = new Curtains(statics, bvh);
   const mirrorTargets = mirrors.map((mm) => setupMirror(scene, mm));
   onProgress(0.85, 'Reflecties');
   const sky = addSky(scene, meta);
   const wbCache = new Map<string, { temperature: number; tint: number }>();
   const world: World = {
-    bvh, doors, statics, dynamics, lightmaps, probes, meta, state: 'dag', shownState: 'dag', pickProbe,
+    bvh, doors, statics, dynamics, curtains, lightmaps, probes, meta, state: 'dag', shownState: 'dag', pickProbe,
     async prepareState(st) {
       const s0: LightState = baked(st) ? st : 'dag';
       await Promise.all([...Object.keys(meta.lm[s0] ?? {}).map((a) => lm(a, s0)), ...START_PROBES.map((r) => probeTex(r, s0))].map(whenReady));
@@ -347,7 +351,7 @@ export async function loadWorld(scene: Scene, onProgress: (f: number, label: str
       if (!v) { v = illuminantToTemperatureTint(world.illuminantAt(x, z)); wbCache.set(k, v); }
       return v;
     },
-    info: { meshes: res.meshes.length, statics: statics.length, dynamics: dynamics.length, doors: doors.length, tris: bvh.triCount, lightFallback: null },
+    info: { meshes: res.meshes.length, statics: statics.length, dynamics: dynamics.length, doors: doors.length, curtainPanels: curtains.panels.length, tris: bvh.triCount, lightFallback: null },
     async warmUp() {
       if (!scene.activeCamera) return;
       for (const rt of mirrorTargets) for (let i = 0; i < 6; i++) { rt.render(); await new Promise((r) => setTimeout(r, 20)); }

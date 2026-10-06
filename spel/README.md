@@ -10,10 +10,11 @@ npm run build     # tsc --noEmit && vite build -> dist/
 ```
 
 ## Structuur
-- `src/game/` — core (engine, camera, beweging, deuren), doors (deurbladen: onderlinge botsing, opzij duwen), session (ronde-runtime), rounds (10 rondes + oefenen), save.
-- `src/engine/` — world (GLB, lichtkaarten, probes, hemel, deuren), lightmap (gebakken irradiantie-plugin), whitebalance.
-- `src/physics/` — driehoeks-BVH, spelerscapsule. `src/swatter/` — slag + continue botsing, hand/mouw/mepper-weergave.
+- `src/game/` — core (engine, camera, beweging, houding, deuren), doors (deurbladen: onderlinge botsing, opzij duwen), session (ronde-runtime), rounds (10 rondes + oefenen), save.
+- `src/engine/` — world (GLB, lichtkaarten, probes, hemel, deuren), lightmap (gebakken irradiantie-plugin), whitebalance, cloth (gordijnen als hangend doek: geven mee bij een klap of als je erlangs loopt), curtains (koppeling met de gordijnmeshes).
+- `src/physics/` — driehoeks-BVH, spelerscapsule (+ `POSTURE`: zelf gekozen houding). `src/swatter/` — slag + continue botsing, hand/mouw/mepper-weergave.
 - `src/mosquito/` — gedrag en model. `src/audio/` — Web Audio. `public/audio/buzz-worklet.js` — zoemsynthese.
+- `src/input/` — duimen, muis en toetsen; de hoogteschuif boven 'Sla' (omlaag bukken tot op handen en knieën, omhoog op de tenen en dan opstappen op bed, stoel of bank; laptop: Q/Z of muiswiel).
 - `public/assets/` — gegenereerd door `hulpmiddelen/chalet/pipeline.py` (chalet.glb, chalet_coll.bin, lm/, probes/, sky/) en `hulpmiddelen/chalet/bl/hand.py` (arm.glb).
 
 ## Buitentafel: aanpassing in de gegenereerde bestanden

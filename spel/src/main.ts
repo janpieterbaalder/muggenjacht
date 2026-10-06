@@ -5,6 +5,7 @@ import type { Session } from './game/session';
 import { ROUNDS } from './game/rounds';
 import { Save } from './game/save';
 import { AudioEngine } from './audio/audio';
+import { stanceToTrack } from './input/stance';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('world');
@@ -73,7 +74,7 @@ async function ensureLoaded() {
       $('loadbar').hidden = false; $('loadlabel').textContent = 'Spel laden';
       // the engine is fetched only now: the start screen itself stays light (G-17)
       const [{ Core }, { Session }] = await Promise.all([import('./game/core'), import('./game/session')]);
-      const c = new Core(canvas, hud, $('swat'), $('door'));
+      const c = new Core(canvas, hud, $('swat'), $('door'), $('stance'));
       c.engine.onContextLostObservable.add(() => contextLost());
       await c.load((f, label) => { $('loadfill').style.right = `${(1 - f) * 100}%`; $('loadlabel').textContent = label; });
       core = c;
@@ -86,6 +87,7 @@ async function ensureLoaded() {
         const st = $('stick'); st.classList.toggle('on', on);
         if (on) { st.style.left = `${ox}px`; st.style.top = `${oy}px`; $('stickknob').style.transform = `translate(${dx}px, ${dy}px)`; }
       };
+      c.input.onStance = showStance; showStance(0);
       applySettings();
       $('loadbar').hidden = true;
       (window as unknown as { muggenjacht: unknown }).muggenjacht = diagnostics();
@@ -139,6 +141,14 @@ function pause() {
 function resume() {
   if (isPortrait()) return;
   show(null); hud.hidden = false; session?.resume();
+}
+/** The posture slider's knob (and its state for the screen reader) where the posture is set. */
+function showStance(s: number) {
+  const el = $('stance');
+  el.style.setProperty('--f', stanceToTrack(s).toFixed(4));
+  el.setAttribute('aria-valuenow', s.toFixed(2));
+  el.setAttribute('aria-valuetext', s < -0.05 ? (s < -0.6 ? 'heel laag' : 'gebukt') : s > 0.05 ? 'op de tenen' : 'staand');
+  el.classList.toggle('low', s < -0.05); el.classList.toggle('up', s > 0.05);
 }
 let toastTimer = 0;
 function toast(msg: string, ms = 1800) {

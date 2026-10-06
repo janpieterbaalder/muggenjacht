@@ -9,7 +9,7 @@ import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
-import type { MosquitoBrain } from './brain';
+import { surfaceBasis, type MosquitoBrain } from './brain';
 import { ProbeDiffusePlugin } from '../engine/lightmap';
 
 const MM = 0.001;
@@ -163,40 +163,54 @@ export class MosquitoVisual {
     if (tex) { m.body.reflectionTexture = tex; m.leg.reflectionTexture = tex; m.wing.reflectionTexture = tex; }
   }
 
-  /** Babylon frame pose from the brain. eye: camera position (readability scale by distance). */
-  sync(b: MosquitoBrain, t: number, eye?: { x: number; y: number; z: number }) {
+  /** Orientation of the body resting on its surface: parallel to it, legs toward it, heading headAngle in surfaceBasis. */
+  private restQuat(b: MosquitoBrain, out: Quaternion) {
+    const n = new Vector3(b.nx, b.ny, b.nz);
+    const { t1, t2 } = surfaceBasis(b.nx, b.ny, b.nz), c = Math.cos(b.headAngle), s = Math.sin(b.headAngle);
+    const fwd = new Vector3(t1[0] * c + t2[0] * s, t1[1] * c + t2[1] * s, t1[2] * c + t2[2] * s).normalize();
+    const right = Vector3.Cross(n, fwd).normalize();
+    Quaternion.FromRotationMatrixToRef(Matrix.FromValues(right.x, right.y, right.z, 0, n.x, n.y, n.z, 0, fwd.x, fwd.y, fwd.z, 0, 0, 0, 0, 1), out);
+  }
+
+  /** last heading in flight (kept while it hovers almost still: a stand-in heading turning with the clock spun the body) */
+  private flightFwd = new Vector3(0, 0, 1);
+  private tmpR = new Quaternion();
+  /** the curtain's displacement it was drawn with; let go over ~0.1 s once it leaves the fabric (no jump) */
+  private carry = new Vector3(); private lastT = -1;
+
+  /** Babylon frame pose from the brain. eye: camera position (readability scale by distance). off: where the surface
+   * under a resting or squashed mosquito has moved to (a curtain that sways): it is drawn there. */
+  sync(b: MosquitoBrain, t: number, eye?: { x: number; y: number; z: number }, off?: { x: number; y: number; z: number }) {
     const r = this.root;
     const flying = b.audible || b.state === 'onhost' && false;
     this.blur.setEnabled(flying);
     this.wingL.setEnabled(!flying); this.wingR.setEnabled(!flying);
     const k = this.scale = eye ? readabilityScale(Math.hypot(b.x - eye.x, b.y - eye.y, b.z - eye.z)) : READABILITY.base;
     this.shadow.setEnabled(b.state === 'rest');
+    const dt = this.lastT < 0 ? 0 : Math.max(0, t - this.lastT);
+    this.lastT = t;
+    if (off) this.carry.set(off.x, off.y, off.z);
+    else if (this.carry.lengthSquared() > 1e-12) this.carry.scaleInPlace(Math.exp(-dt / 0.04));
+    const ox = this.carry.x, oy = this.carry.y, oz = this.carry.z;
+    const n = new Vector3(b.nx, b.ny, b.nz);
     if (b.state === 'rest' || b.state === 'squashed' || b.state === 'dead') {
-      // body parallel to surface, legs toward it; surface normal n, heading headAngle within tangent plane
-      const n = new Vector3(b.nx, b.ny, b.nz);
-      let tx = new Vector3(0, 1, 0);
-      if (Math.abs(n.y) > 0.9) tx = new Vector3(1, 0, 0);
-      const t1 = Vector3.Cross(n, tx).normalize(), t2 = Vector3.Cross(t1, n).normalize();
-      const fwd = t1.scale(Math.cos(b.headAngle)).add(t2.scale(Math.sin(b.headAngle))).normalize();
-      const up = n;
-      const right = Vector3.Cross(up, fwd).normalize();
-      const M = Matrix.FromValues(right.x, right.y, right.z, 0, up.x, up.y, up.z, 0, fwd.x, fwd.y, fwd.z, 0, 0, 0, 0, 1);
-      Quaternion.FromRotationMatrixToRef(M, this.tmpQ);
+      this.restQuat(b, this.tmpQ);
       r.rotationQuaternion = this.tmpQ.clone();
       // the brain keeps a resting mosquito REST_GAP off its surface (flight clearance); the model stands ON the surface:
       // the lowest feet are FOOT below the body centre at scale 1 (REVIEW-01 G-11: legs floated 1.7-2.5 mm, the contact
       // shadow 4-5.6 mm). Squashed: flattened body on the surface; dead (on its back): dorsal side on the floor.
       const lift = (b.state === 'squashed' ? 0.0007 : b.state === 'dead' ? DORSAL : FOOT) * k - (b.state === 'dead' ? FALL_GAP : REST_GAP);
-      r.position.set(b.x + n.x * lift, b.y + n.y * lift, b.z + n.z * lift);
+      r.position.set(b.x + n.x * lift + ox, b.y + n.y * lift + oy, b.z + n.z * lift + oz);
       if (b.state === 'squashed') {
         r.scaling.set(1.25 * k, 0.25 * k, 1.1 * k);
+        const o = 0.0003 - REST_GAP;                     // on the surface (depth bias via zOffset)
         if (!this.smear) {
           this.smear = MeshBuilder.CreatePlane('vlek', { size: 0.009 * k }, r.getScene());
           this.smear.material = materials(r.getScene()).smear; this.smear.isPickable = false;
-          const o = 0.0003 - REST_GAP;                   // on the surface (depth bias via zOffset)
           this.smear.position.set(b.x + n.x * o, b.y + n.y * o, b.z + n.z * o);
           this.smear.lookAt(this.smear.position.subtract(n));
         }
+        this.smear.position.set(b.x + n.x * o + ox, b.y + n.y * o + oy, b.z + n.z * o + oz);
       } else if (b.state === 'dead') {
         r.scaling.setAll(k); r.rotationQuaternion = Quaternion.RotationYawPitchRoll(b.headAngle, 0, Math.PI * 0.85);
       } else r.scaling.setAll(k);
@@ -207,11 +221,21 @@ export class MosquitoVisual {
     r.scaling.setAll(k);
     const v = new Vector3(b.vx, b.vy * 0.5, b.vz);
     const sp = v.length();
-    const fwd = sp > 0.02 ? v.scale(1 / sp) : new Vector3(Math.cos(t), 0, Math.sin(t));
+    if (sp > 0.02) this.flightFwd.copyFrom(v.scale(1 / sp));
+    const fwd = this.flightFwd;
     const yaw = Math.atan2(fwd.x, fwd.z), pitch = -Math.asin(Math.max(-0.6, Math.min(0.6, fwd.y))) - 0.25;
-    r.rotationQuaternion = Quaternion.RotationYawPitchRoll(yaw, pitch, Math.sin(t * 9 + b.id) * 0.15);
+    const q = Quaternion.RotationYawPitchRoll(yaw, pitch, Math.sin(t * 9 + b.id) * 0.15);
     const bob = Math.sin(t * 31 + b.id) * 0.0006;
-    r.position.set(b.x, b.y + bob, b.z);
+    // touching down or taking off: turned part of the way into (or out of) the resting pose, the legs coming down onto
+    // the surface - the pose blends instead of jumping when it lands or leaves
+    const s = b.settle;
+    if (s > 0) {
+      this.restQuat(b, this.tmpR);
+      Quaternion.SlerpToRef(q, this.tmpR, s * s * (3 - 2 * s), q);
+      const lift = (FOOT * k - REST_GAP) * s;
+      r.position.set(b.x + n.x * lift + ox, b.y + bob * (1 - s) + n.y * lift + oy, b.z + n.z * lift + oz);
+    } else r.position.set(b.x + ox, b.y + bob + oy, b.z + oz);
+    r.rotationQuaternion = q;
     const beat = Math.sin(b.wingPhase);
     this.blur.scaling.set(1.5, 0.75 + beat * 0.05, 1);
   }
